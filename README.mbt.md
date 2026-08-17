@@ -245,8 +245,8 @@ since every earlier stage's stdout is the pipe.
 standard output line by line while the command runs, which is what a
 long-running build or test needs in order to report progress. Completed lines
 are not retained, so total output is unbounded; `max_line_bytes` (8 MiB by
-default) bounds the one line being assembled, so a child that never emits a
-newline cannot exhaust memory. Both `\n` and `\r\n` are recognised.
+default) caps any one line exactly, so a child that never emits a newline
+cannot exhaust memory. Both `\n` and `\r\n` are recognised as terminators.
 
 ```mbt check
 ///|

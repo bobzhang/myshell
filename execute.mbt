@@ -68,10 +68,11 @@ pub async fn Cmd::status(self : Cmd, timeout_ms? : Int) -> Int {
 /// newline is delivered as a final line. Standard error follows the same rule
 /// as in `status`.
 ///
-/// Completed lines are not retained, so total output is unbounded, but one
-/// line is held while it is assembled. A child that never emits a newline
-/// would grow that line forever, so `max_line_bytes` caps it and raises
-/// `OutputLimitExceeded` when a single line exceeds it.
+/// Completed lines are not retained, so total output is unbounded. One line is
+/// held while it is assembled, and `max_line_bytes` caps it exactly: any single
+/// line longer than that raises `OutputLimitExceeded`, whether or not a newline
+/// ever arrives. A child that emits no newline therefore cannot exhaust
+/// memory.
 ///
 /// Raises `StdoutNotCaptured` when `stdout` sends the stream elsewhere, since
 /// there would be nothing to read.
@@ -354,44 +355,63 @@ async fn read_bounded(
 /// the run, and it stops early once its internal buffer fills. Decoding here is
 /// lossy and per line, matching how `Output` treats captured text.
 ///
-/// Only one line is held at a time, but a child that never emits a newline
-/// would still grow that one line without bound, so `limit` caps it.
+/// Only one line is held at a time, and `limit` caps that line exactly: every
+/// append is refused before it would carry the line past the limit, so a child
+/// that never emits a newline cannot grow it without bound.
 async fn read_lines(
   reader : @pipe.PipeRead,
   on_line : async (String) -> Unit,
   limit : Int,
 ) -> Unit {
   let pending = @buffer.Buffer(size_hint=4096)
-  //
-  // Emit `pending` as one line, dropping the CR of a CRLF terminator.
-  let flush = () => {
-    let raw = pending.to_bytes()
-    let length = raw.length()
-    let bytes = if length > 0 && raw[length - 1] == b'\r' {
-      raw[:length - 1].to_owned()
-    } else {
-      raw
-    }
-    pending.reset()
-    on_line(@utf8.decode_lossy(bytes))
-  }
   while reader.read_some(max_len=4096) is Some(chunk) {
     let mut start = 0
     for index in 0..<chunk.length() {
       if chunk[index] == b'\n' {
-        pending.write_bytesview(chunk[start:index])
-        flush()
+        extend_line(pending, chunk[start:index], limit)
+        on_line(take_line(pending, terminated=true))
         start = index + 1
       }
     }
-    pending.write_bytesview(chunk[start:])
-    if pending.length() > limit {
-      raise OutputLimitExceeded(stream="stdout line", limit~)
-    }
+    extend_line(pending, chunk[start:], limit)
   }
   if pending.length() > 0 {
-    flush()
+    on_line(take_line(pending, terminated=false))
   }
+}
+
+///|
+/// Append to the line being assembled, refusing to grow it past `limit`.
+///
+/// Checking before the write is what makes the cap exact: `pending` never holds
+/// more than `limit` bytes, whether or not the line is ever terminated.
+fn extend_line(
+  pending : @buffer.Buffer,
+  view : BytesView,
+  limit : Int,
+) -> Unit raise ProcessError {
+  if pending.length() + view.length() > limit {
+    raise OutputLimitExceeded(stream="stdout line", limit~)
+  }
+  pending.write_bytesview(view)
+}
+
+///|
+/// Take the assembled line and reset the buffer.
+///
+/// The CR of a CRLF terminator is dropped, but only for a line that a newline
+/// actually terminated: a lone trailing CR in the final unterminated fragment
+/// is data, not punctuation.
+fn take_line(pending : @buffer.Buffer, terminated~ : Bool) -> String {
+  let raw = pending.to_bytes()
+  pending.reset()
+  let length = raw.length()
+  let bytes = if terminated && length > 0 && raw[length - 1] == b'\r' {
+    raw[:length - 1].to_owned()
+  } else {
+    raw
+  }
+  @utf8.decode_lossy(bytes)
 }
 
 ///|

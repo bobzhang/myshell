@@ -428,3 +428,43 @@ async test "each_line strips a CRLF terminator" {
   |> ignore
   assert_eq(seen, ["a", "b", "c"])
 }
+
+///|
+#cfg(not(platform="windows"))
+async test "the line cap applies to terminated lines too" {
+  // The line ends with a newline, so it is never held for long — the cap is
+  // still a promise about line length, not just about memory.
+  try
+    @myshell.Cmd("printf", ["%s\n", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]).each_line(
+      _line => (),
+      max_line_bytes=8,
+    )
+    |> ignore
+  catch {
+    @myshell.ProcessError::OutputLimitExceeded(stream~, limit~) => {
+      inspect(stream, content="stdout line")
+      inspect(limit, content="8")
+    }
+    _ => fail("unexpected error")
+  } noraise {
+    _ => fail("expected OutputLimitExceeded")
+  }
+  // A line exactly at the limit is allowed.
+  let seen = []
+  @myshell.Cmd("printf", ["%s\n", "aaaaaaaa"]).each_line(
+    line => seen.push(line),
+    max_line_bytes=8,
+  )
+  |> ignore
+  assert_eq(seen, ["aaaaaaaa"])
+}
+
+///|
+#cfg(not(platform="windows"))
+async test "a lone trailing carriage return is data, not a terminator" {
+  let seen = []
+  @myshell.Cmd("printf", ["a\r\nb\r"]).each_line(line => seen.push(line))
+  |> ignore
+  // "a\r\n" is a CRLF line; the final "b\r" was never terminated.
+  assert_eq(seen, ["a", "b\r"])
+}
