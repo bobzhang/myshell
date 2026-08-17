@@ -1,6 +1,8 @@
 ///|
-/// A non-empty sequence of commands connected by operating-system pipes.
-pub struct Pipeline {
+/// A sequence of commands connected by operating-system pipes.
+///
+/// An empty pipeline is rejected when execution is requested.
+struct Pipeline {
   commands_ : Array[Cmd]
 } derive(Debug)
 
@@ -8,7 +10,8 @@ pub struct Pipeline {
 /// Create a pipeline from `commands`.
 ///
 /// An empty pipeline is rejected when it is executed.
-pub fn Pipeline::new(commands : Array[Cmd]) -> Pipeline {
+#alias(new, deprecated="Use Pipeline::Pipeline instead")
+pub fn Pipeline::Pipeline(commands : Array[Cmd]) -> Pipeline {
   { commands_: commands.copy() }
 }
 
@@ -24,4 +27,9 @@ pub fn Pipeline::pipe(self : Pipeline, command : Cmd) -> Pipeline {
 /// Return the commands in execution order.
 pub fn Pipeline::commands(self : Pipeline) -> Array[Cmd] {
   self.commands_.copy()
+}
+
+///|
+fn Pipeline::snapshot(self : Pipeline) -> Pipeline {
+  { commands_: [ for command in self.commands_ => command.snapshot() ] }
 }

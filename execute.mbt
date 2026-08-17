@@ -6,21 +6,26 @@
 pub enum Process {}
 
 ///|
-/// Execute one command and capture stdout and stderr.
+/// Default aggregate limit for captured stdout and stderr: 8 MiB.
+pub let default_max_output_bytes : Int = 8 * 1024 * 1024
+
+///|
+/// Execute this command and capture stdout and stderr.
 ///
 /// Standard input is closed by default. Use `Cmd::stdin` to supply text.
-/// Captured stdout and stderr share the `max_output_bytes` limit (8 MiB by
-/// default). When `timeout` expires, the direct child is killed immediately;
-/// descendants require enforcement by the host's native process sandbox.
-pub async fn Process::run(
-  cmd : Cmd,
-  timeout? : Int,
-  max_output_bytes? : Int = 8 * 1024 * 1024,
+/// Captured stdout and stderr share `max_output_bytes`. When `timeout_ms`
+/// expires, the direct child is killed immediately; descendants require
+/// enforcement by the host's native process sandbox.
+pub async fn Cmd::output(
+  self : Cmd,
+  timeout_ms? : Int,
+  max_output_bytes? : Int = default_max_output_bytes,
 ) -> Output {
+  let cmd = self.snapshot()
   validate_cmd(cmd)
   validate_output_limit(max_output_bytes)
-  let pipeline = Pipeline::new([cmd])
-  match timeout {
+  let pipeline = Pipeline::Pipeline([cmd])
+  match timeout_ms {
     None => run_pipeline(pipeline, max_output_bytes)
     Some(milliseconds) =>
       @async.with_timeout(milliseconds, () => {
@@ -30,18 +35,17 @@ pub async fn Process::run(
 }
 
 ///|
-/// Execute a pipeline and capture its final stdout and every stage's stderr.
+/// Execute this pipeline and capture final stdout plus every stage's stderr.
 ///
-/// `Pipeline` uses real operating-system pipes. All stages run concurrently
-/// under one structured-concurrency scope. When `timeout` is present, the whole
-/// pipeline is cancelled if it does not finish within that many milliseconds.
-/// The direct child for each stage is killed immediately on cancellation;
-/// descendants require enforcement by the host's native process sandbox.
-pub async fn Process::pipeline(
-  pipeline : Pipeline,
-  timeout? : Int,
-  max_output_bytes? : Int = 8 * 1024 * 1024,
+/// Stages use real operating-system pipes and run concurrently in one
+/// structured task group. `timeout_ms`, when present, applies to the whole
+/// pipeline.
+pub async fn Pipeline::output(
+  self : Pipeline,
+  timeout_ms? : Int,
+  max_output_bytes? : Int = default_max_output_bytes,
 ) -> Output {
+  let pipeline = self.snapshot()
   if pipeline.commands_.is_empty() {
     raise ProcessError::EmptyPipeline
   }
@@ -52,13 +56,46 @@ pub async fn Process::pipeline(
       raise StdinOnNonFirstStage(index)
     }
   }
-  match timeout {
+  match timeout_ms {
     None => run_pipeline(pipeline, max_output_bytes)
     Some(milliseconds) =>
       @async.with_timeout(milliseconds, () => {
         run_pipeline(pipeline, max_output_bytes)
       })
   }
+}
+
+///|
+/// Execute one command and capture stdout and stderr.
+///
+/// Standard input is closed by default. Use `Cmd::stdin` to supply text.
+/// Captured stdout and stderr share the `max_output_bytes` limit (8 MiB by
+/// default). When `timeout` expires, the direct child is killed immediately;
+/// descendants require enforcement by the host's native process sandbox.
+#deprecated("Use Cmd::output instead")
+pub async fn Process::run(
+  cmd : Cmd,
+  timeout? : Int,
+  max_output_bytes? : Int = default_max_output_bytes,
+) -> Output {
+  cmd.output(timeout_ms?=timeout, max_output_bytes~)
+}
+
+///|
+/// Execute a pipeline and capture its final stdout and every stage's stderr.
+///
+/// `Pipeline` uses real operating-system pipes. All stages run concurrently
+/// under one structured-concurrency scope. When `timeout` is present, the whole
+/// pipeline is cancelled if it does not finish within that many milliseconds.
+/// The direct child for each stage is killed immediately on cancellation;
+/// descendants require enforcement by the host's native process sandbox.
+#deprecated("Use Pipeline::output instead")
+pub async fn Process::pipeline(
+  pipeline : Pipeline,
+  timeout? : Int,
+  max_output_bytes? : Int = default_max_output_bytes,
+) -> Output {
+  pipeline.output(timeout_ms?=timeout, max_output_bytes~)
 }
 
 ///|
@@ -82,6 +119,9 @@ fn validate_cmd(cmd : Cmd) -> Unit raise ProcessError {
   for name, value in cmd.environment_ {
     if name.contains("\u{0000}") {
       raise NulByte("environment name")
+    }
+    if name.is_empty() || name.contains("=") {
+      raise InvalidEnvironmentName(name)
     }
     if value.contains("\u{0000}") {
       raise NulByte("environment value for \{name}")
@@ -200,7 +240,7 @@ async fn run_pipeline(pipeline : Pipeline, max_output_bytes : Int) -> Output {
         }),
       )
     }
-    group.spawn_bg() <| () => {
+    group.spawn_bg(allow_failure=true) <| () => {
       defer first_stdin_writer.close()
       match commands[0].stdin_ {
         Some(input) => first_stdin_writer.write(input)

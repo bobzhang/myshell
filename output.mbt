@@ -4,7 +4,7 @@
 /// For a pipeline, `exit_code` uses pipefail semantics: it is the rightmost
 /// non-zero stage status, or zero when every stage succeeds. `stderr` is the
 /// concatenation of `stage_stderr` in stage order.
-pub(all) struct Output {
+pub struct Output {
   exit_code : Int
   stage_exit_codes : Array[Int]
   stdout_bytes : Bytes
@@ -35,6 +35,7 @@ pub fn Output::check(self : Output) -> Output raise ProcessError {
 pub(all) suberror ProcessError {
   EmptyProgram
   EmptyPipeline
+  InvalidEnvironmentName(String)
   InvalidOutputLimit(Int)
   OutputLimitExceeded(stream~ : String, limit~ : Int)
   NulByte(String)

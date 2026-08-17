@@ -4,7 +4,7 @@
 /// `program` is an executable name or path. Every element of `arguments` is
 /// passed as one literal argument. Shell operators such as `|`, `>`, `&&`,
 /// `$()`, and `*` have no special meaning.
-pub struct Cmd {
+struct Cmd {
   program_ : String
   arguments_ : Array[String]
   cwd_ : String?
@@ -20,12 +20,13 @@ pub struct Cmd {
 /// # Example
 /// ```mbt check
 /// test {
-///   let cmd = Cmd::new("git", ["status", "--short"])
+///   let cmd = Cmd::Cmd("git", ["status", "--short"])
 ///   inspect(cmd.program(), content="git")
 ///   debug_inspect(cmd.arguments(), content="[\"status\", \"--short\"]")
 /// }
 /// ```
-pub fn Cmd::new(program : String, arguments : Array[String]) -> Cmd {
+#alias(new, deprecated="Use Cmd::Cmd instead")
+pub fn Cmd::Cmd(program : String, arguments : Array[String]) -> Cmd {
   {
     program_: program,
     arguments_: arguments.copy(),
@@ -166,7 +167,7 @@ pub fn Cmd::no_console_window(self : Cmd) -> Cmd {
 ///|
 /// Start a two-command pipeline.
 pub fn Cmd::pipe(self : Cmd, next : Cmd) -> Pipeline {
-  Pipeline::new([self, next])
+  Pipeline([self, next])
 }
 
 ///|
@@ -203,4 +204,21 @@ pub fn Cmd::inherits_environment(self : Cmd) -> Bool {
 /// Return the configured standard input text, if any.
 pub fn Cmd::standard_input(self : Cmd) -> String? {
   self.stdin_
+}
+
+///|
+/// Make a deep snapshot for execution.
+///
+/// `Array` and `Map` are mutable reference types, so copying every collection
+/// here prevents a plan from changing after validation once async work begins.
+fn Cmd::snapshot(self : Cmd) -> Cmd {
+  {
+    program_: self.program_,
+    arguments_: self.arguments_.copy(),
+    cwd_: self.cwd_,
+    environment_: self.environment_.copy(),
+    inherit_environment_: self.inherit_environment_,
+    stdin_: self.stdin_,
+    no_console_window_: self.no_console_window_,
+  }
 }

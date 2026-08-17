@@ -6,11 +6,13 @@ import {
 }
 
 // Values
+pub let default_max_output_bytes : Int
 
 // Errors
 pub(all) suberror ProcessError {
   EmptyProgram
   EmptyPipeline
+  InvalidEnvironmentName(String)
   InvalidOutputLimit(Int)
   OutputLimitExceeded(stream~ : String, limit~ : Int)
   NulByte(String)
@@ -19,15 +21,9 @@ pub(all) suberror ProcessError {
 } derive(@debug.Debug)
 
 // Types and methods
-pub struct Cmd {
-  program_ : String
-  arguments_ : Array[String]
-  cwd_ : String?
-  environment_ : Map[String, String]
-  inherit_environment_ : Bool
-  stdin_ : String?
-  no_console_window_ : Bool
-} derive(@debug.Debug)
+type Cmd derive(@debug.Debug)
+#alias(new, deprecated)
+pub fn Cmd::Cmd(String, Array[String]) -> Self
 pub fn Cmd::arg(Self, String) -> Self
 pub fn Cmd::args(Self, ArrayView[String]) -> Self
 pub fn Cmd::arguments(Self) -> Array[String]
@@ -37,15 +33,15 @@ pub fn Cmd::env(Self, String, String) -> Self
 pub fn Cmd::environment(Self) -> Map[String, String]
 pub fn Cmd::envs(Self, Map[String, String]) -> Self
 pub fn Cmd::inherits_environment(Self) -> Bool
-pub fn Cmd::new(String, Array[String]) -> Self
 pub fn Cmd::no_console_window(Self) -> Self
+pub async fn Cmd::output(Self, timeout_ms? : Int, max_output_bytes? : Int) -> Output
 pub fn Cmd::pipe(Self, Self) -> Pipeline
 pub fn Cmd::program(Self) -> String
 pub fn Cmd::standard_input(Self) -> String?
 pub fn Cmd::stdin(Self, String) -> Self
 pub fn Cmd::working_directory(Self) -> String?
 
-pub(all) struct Output {
+pub struct Output {
   exit_code : Int
   stage_exit_codes : Array[Int]
   stdout_bytes : Bytes
@@ -58,16 +54,18 @@ pub(all) struct Output {
 pub fn Output::check(Self) -> Self raise ProcessError
 pub fn Output::success(Self) -> Bool
 
-pub struct Pipeline {
-  commands_ : Array[Cmd]
-} derive(@debug.Debug)
+type Pipeline derive(@debug.Debug)
+#alias(new, deprecated)
+pub fn Pipeline::Pipeline(Array[Cmd]) -> Self
 pub fn Pipeline::commands(Self) -> Array[Cmd]
-pub fn Pipeline::new(Array[Cmd]) -> Self
+pub async fn Pipeline::output(Self, timeout_ms? : Int, max_output_bytes? : Int) -> Output
 pub fn Pipeline::pipe(Self, Cmd) -> Self
 
 pub enum Process {
 }
+#deprecated
 pub async fn Process::pipeline(Pipeline, timeout? : Int, max_output_bytes? : Int) -> Output
+#deprecated
 pub async fn Process::run(Cmd, timeout? : Int, max_output_bytes? : Int) -> Output
 
 // Type aliases

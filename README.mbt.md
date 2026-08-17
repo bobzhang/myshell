@@ -48,7 +48,7 @@ Use an `async fn main`; MoonBit async code does not use an `await` keyword.
 ///|
 #cfg(not(platform="windows"))
 async test {
-  let output = Process::run(Cmd::new("printf", ["hello"]))
+  let output = Cmd::Cmd("printf", ["hello"]).output()
   assert_eq(output.exit_code, 0)
   assert_eq(output.stdout, "hello")
 }
@@ -63,7 +63,7 @@ pipe.
 ///|
 #cfg(not(platform="windows"))
 async test {
-  let output = Process::run(Cmd::new("printf", ["%s", "$(echo no) | *"]))
+  let output = Cmd::Cmd("printf", ["%s", "$(echo no) | *"]).output()
   assert_eq(output.stdout, "$(echo no) | *")
 }
 ```
@@ -75,7 +75,7 @@ Builders return copies, so a reusable base command is not mutated.
 ```mbt check
 ///|
 test {
-  let git = Cmd::new("git", [])
+  let git = Cmd::Cmd("git", [])
   let status = git.args(["status", "--short"])
   let diff = git.arg("diff")
   debug_inspect(status.arguments(), content="[\"status\", \"--short\"]")
@@ -93,12 +93,12 @@ operating-system pipes and run concurrently in one structured task group.
 ///|
 #cfg(not(platform="windows"))
 async test {
-  let plan = Pipeline::new([
-    Cmd::new("printf", ["alpha\nbeta\n"]),
-    Cmd::new("grep", ["beta"]),
-    Cmd::new("tr", ["a-z", "A-Z"]),
+  let plan = Pipeline::Pipeline([
+    Cmd("printf", ["alpha\nbeta\n"]),
+    Cmd("grep", ["beta"]),
+    Cmd("tr", ["a-z", "A-Z"]),
   ])
-  let output = Process::pipeline(plan)
+  let output = plan.output()
   assert_eq(output.stdout, "BETA\n")
   assert_eq(output.stage_exit_codes, [0, 0, 0])
 }
@@ -109,9 +109,9 @@ The equivalent incremental form is deliberately ordinary:
 ```mbt check
 ///|
 test {
-  let plan = Cmd::new("printf", ["hello"])
-    .pipe(Cmd::new("cat", []))
-    .pipe(Cmd::new("wc", ["-c"]))
+  let plan = Cmd::Cmd("printf", ["hello"])
+    .pipe(Cmd("cat", []))
+    .pipe(Cmd("wc", ["-c"]))
   assert_eq(plan.commands().length(), 3)
 }
 ```
@@ -126,10 +126,8 @@ pipeline.
 ///|
 #cfg(not(platform="windows"))
 async test {
-  let plan = Cmd::new("cat", [])
-    .stdin("hello")
-    .pipe(Cmd::new("tr", ["a-z", "A-Z"]))
-  let output = Process::pipeline(plan)
+  let plan = Cmd::Cmd("cat", []).stdin("hello").pipe(Cmd("tr", ["a-z", "A-Z"]))
+  let output = plan.output()
   assert_eq(output.stdout, "HELLO")
 }
 ```
@@ -139,7 +137,7 @@ async test {
 ```mbt check
 ///|
 test {
-  let command = Cmd::new("tool", ["check"])
+  let command = Cmd::Cmd("tool", ["check"])
     .cwd("workspace")
     .env("NO_COLOR", "1")
   debug_inspect(command.working_directory(), content="Some(\"workspace\")")
@@ -151,14 +149,14 @@ Use `.clear_env()` before `.env(...)` to start with an empty environment.
 
 ## 7. Inspect exit status
 
-`Process::run` does not turn a non-zero exit status into an exception. Use
+`Cmd::output` does not turn a non-zero exit status into an exception. Use
 ordinary MoonBit control flow or call `check()` when failure should raise.
 
 ```mbt check
 ///|
 #cfg(not(platform="windows"))
 async test {
-  let output = Process::run(Cmd::new("false", []))
+  let output = Cmd::Cmd("false", []).output()
   if !output.success() {
     assert_eq(output.exit_code, 1)
   }
@@ -174,9 +172,7 @@ succeed. Every individual status remains available in `stage_exit_codes`.
 ///|
 #cfg(not(platform="windows"))
 async test {
-  let output = Process::pipeline(
-    Pipeline::new([Cmd::new("false", []), Cmd::new("cat", [])]),
-  )
+  let output = Pipeline::Pipeline([Cmd("false", []), Cmd("cat", [])]).output()
   assert_eq(output.exit_code, 1)
   assert_eq(output.stage_exit_codes, [1, 0])
 }
@@ -191,18 +187,13 @@ lossy UTF-8 decoding so arbitrary process output cannot cancel sibling stages.
 
 ```mbt check
 ///|
-test {
-  let output : Output = {
-    exit_code: 1,
-    stage_exit_codes: [1],
-    stdout_bytes: b"",
-    stdout: "",
-    stderr_bytes: b"problem\n",
-    stderr: "problem\n",
-    stage_stderr_bytes: [b"problem\n"],
-    stage_stderr: ["problem\n"],
-  }
-  assert_eq(output.stage_stderr[0], "problem\n")
+#cfg(not(platform="windows"))
+async test {
+  let output = Cmd::Cmd("/usr/bin/grep", [
+    "needle", "/definitely/not/a/real/myshell-file",
+  ]).output()
+  assert_true(!output.stderr.is_empty())
+  assert_eq(output.stage_stderr.length(), 1)
 }
 ```
 
@@ -216,7 +207,7 @@ the host's native process sandbox.
 ///|
 #cfg(not(platform="windows"))
 async test {
-  try Process::run(Cmd::new("sleep", ["1"]), timeout=20) catch {
+  try Cmd::Cmd("sleep", ["1"]).output(timeout_ms=20) catch {
     @async.TimeoutError => ()
     _ => fail("expected TimeoutError")
   } noraise {
@@ -231,7 +222,7 @@ needed:
 
 ```mbt nocheck
 ///|
-let output = Process::run(command, max_output_bytes=32 * 1024 * 1024)
+let output = command.output(max_output_bytes=32 * 1024 * 1024)
 ```
 
 If all captured streams together exceed the limit, execution raises
@@ -249,12 +240,10 @@ moon run -e 'import {
 }
 
 async fn main {
-  let output = @myshell.Process::pipeline(
-    @myshell.Pipeline::new([
-      @myshell.Cmd::new("printf", ["hello\nworld\n"]),
-      @myshell.Cmd::new("grep", ["world"]),
-    ]),
-  )
+  let output = @myshell.Pipeline::Pipeline([
+    @myshell.Cmd::Cmd("/usr/bin/printf", ["hello\nworld\n"]).clear_env(),
+    @myshell.Cmd::Cmd("/usr/bin/grep", ["world"]).clear_env(),
+  ]).output()
   print(output.stdout)
 }'
 ```
