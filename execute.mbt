@@ -7,8 +7,9 @@ pub let default_max_output_bytes : Int = 8 * 1024 * 1024
 priv enum Sink {
   /// Collect into `Output`, bounded by the given aggregate byte limit.
   Buffer(Int)
-  /// Deliver final stdout one line at a time; nothing is accumulated.
-  Lines(async (String) -> Unit)
+  /// Deliver final stdout one line at a time, holding at most one line of the
+  /// given size.
+  Lines(async (String) -> Unit, Int)
   /// Keep nothing; a `Capture` stream falls back to the parent's descriptor.
   Discard
 }
@@ -61,11 +62,16 @@ pub async fn Cmd::status(self : Cmd, timeout_ms? : Int) -> Int {
 ///|
 /// Execute this command, delivering standard output one line at a time.
 ///
-/// `on_line` receives each line without its terminator, as soon as the child
-/// flushes it, so a long-running command can report progress instead of
-/// arriving as one block at the end. Nothing is accumulated, so there is no
-/// capture limit. A trailing fragment with no newline is delivered as a final
-/// line. Standard error follows the same rule as in `status`.
+/// `on_line` receives each line without its terminator — `\n` or `\r\n` — as
+/// soon as the child flushes it, so a long-running command can report progress
+/// instead of arriving as one block at the end. A trailing fragment with no
+/// newline is delivered as a final line. Standard error follows the same rule
+/// as in `status`.
+///
+/// Completed lines are not retained, so total output is unbounded, but one
+/// line is held while it is assembled. A child that never emits a newline
+/// would grow that line forever, so `max_line_bytes` caps it and raises
+/// `OutputLimitExceeded` when a single line exceeds it.
 ///
 /// Raises `StdoutNotCaptured` when `stdout` sends the stream elsewhere, since
 /// there would be nothing to read.
@@ -86,8 +92,13 @@ pub async fn Cmd::each_line(
   self : Cmd,
   on_line : async (String) -> Unit,
   timeout_ms? : Int,
+  max_line_bytes? : Int = default_max_output_bytes,
 ) -> Int {
-  Pipeline::{ commands: [self] }.execute(Lines(on_line), timeout_ms).exit_code
+  validate_output_limit(max_line_bytes)
+  Pipeline::{ commands: [self] }.execute(
+    Lines(on_line, max_line_bytes),
+    timeout_ms,
+  ).exit_code
 }
 
 ///|
@@ -122,7 +133,7 @@ pub async fn Pipeline::output(
 /// time.
 ///
 /// The returned status uses the same pipefail rule as `output`. See
-/// `Cmd::each_line` for how lines are delivered.
+/// `Cmd::each_line` for how lines are delivered and bounded.
 ///
 /// # Example
 /// ```mbt check
@@ -141,8 +152,10 @@ pub async fn Pipeline::each_line(
   self : Pipeline,
   on_line : async (String) -> Unit,
   timeout_ms? : Int,
+  max_line_bytes? : Int = default_max_output_bytes,
 ) -> Int {
-  self.execute(Lines(on_line), timeout_ms).exit_code
+  validate_output_limit(max_line_bytes)
+  self.execute(Lines(on_line, max_line_bytes), timeout_ms).exit_code
 }
 
 ///|
@@ -165,7 +178,7 @@ async fn Pipeline::execute(
       raise RedirectOnNonFinalStage(index)
     }
   }
-  if sink is Lines(_) && !(self.commands[count - 1].stdout is Capture) {
+  if sink is Lines(_, _) && !(self.commands[count - 1].stdout is Capture) {
     raise StdoutNotCaptured
   }
   match timeout_ms {
@@ -232,6 +245,12 @@ fn validate_output_limit(limit : Int) -> Unit raise ProcessError {
 ///
 /// `None` means the child inherits the parent's descriptor. `capture` is the
 /// pipe this run reads from, and is absent when the caller keeps nothing.
+///
+/// A file handle returned here is closed by the spawn that consumes it, via the
+/// runtime's `after_spawn` hook. `&ProcessOutput` exposes no close operation, so
+/// if a later setup step for the same stage fails before the spawn, that handle
+/// stays open until the process exits. Resolving happens immediately before the
+/// spawn to keep that window as small as possible.
 async fn resolve_redirect(
   redirect : Redirect,
   capture : @pipe.PipeWrite?,
@@ -334,25 +353,44 @@ async fn read_bounded(
 /// `read_until`: that helper decodes strictly, so one invalid byte would abort
 /// the run, and it stops early once its internal buffer fills. Decoding here is
 /// lossy and per line, matching how `Output` treats captured text.
+///
+/// Only one line is held at a time, but a child that never emits a newline
+/// would still grow that one line without bound, so `limit` caps it.
 async fn read_lines(
   reader : @pipe.PipeRead,
   on_line : async (String) -> Unit,
+  limit : Int,
 ) -> Unit {
   let pending = @buffer.Buffer(size_hint=4096)
+  //
+  // Emit `pending` as one line, dropping the CR of a CRLF terminator.
+  let flush = () => {
+    let raw = pending.to_bytes()
+    let length = raw.length()
+    let bytes = if length > 0 && raw[length - 1] == b'\r' {
+      raw[:length - 1].to_owned()
+    } else {
+      raw
+    }
+    pending.reset()
+    on_line(@utf8.decode_lossy(bytes))
+  }
   while reader.read_some(max_len=4096) is Some(chunk) {
     let mut start = 0
     for index in 0..<chunk.length() {
       if chunk[index] == b'\n' {
         pending.write_bytesview(chunk[start:index])
-        on_line(@utf8.decode_lossy(pending.to_bytes()))
-        pending.reset()
+        flush()
         start = index + 1
       }
     }
     pending.write_bytesview(chunk[start:])
+    if pending.length() > limit {
+      raise OutputLimitExceeded(stream="stdout line", limit~)
+    }
   }
   if pending.length() > 0 {
-    on_line(@utf8.decode_lossy(pending.to_bytes()))
+    flush()
   }
 }
 
@@ -411,10 +449,10 @@ async fn run_pipeline(pipeline : Pipeline, sink : Sink) -> Output {
             read_bounded(reader, captured, limit, "stdout")
           }),
         )
-      (Some((reader, _)), Lines(on_line)) => {
+      (Some((reader, _)), Lines(on_line, line_limit)) => {
         group.spawn_bg(() => {
           defer reader.close()
-          read_lines(reader, on_line)
+          read_lines(reader, on_line, line_limit)
         })
         None
       }

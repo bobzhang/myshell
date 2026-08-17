@@ -400,3 +400,31 @@ async test "redirection is rejected where it would break the plan" {
     _ => fail("expected NulByte")
   }
 }
+
+///|
+#cfg(not(platform="windows"))
+async test "each_line bounds a single unterminated line" {
+  try
+    @myshell.Cmd("/usr/bin/awk", [
+      "BEGIN { for (i = 0; i < 100; i++) printf \"aaaaaaaaaa\" }",
+    ]).each_line(_line => (), max_line_bytes=64)
+    |> ignore
+  catch {
+    @myshell.ProcessError::OutputLimitExceeded(stream~, limit~) => {
+      inspect(stream, content="stdout line")
+      inspect(limit, content="64")
+    }
+    _ => fail("unexpected error")
+  } noraise {
+    _ => fail("expected OutputLimitExceeded")
+  }
+}
+
+///|
+#cfg(not(platform="windows"))
+async test "each_line strips a CRLF terminator" {
+  let seen = []
+  @myshell.Cmd("printf", ["a\r\nb\r\nc"]).each_line(line => seen.push(line))
+  |> ignore
+  assert_eq(seen, ["a", "b", "c"])
+}

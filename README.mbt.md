@@ -82,8 +82,8 @@ enum Redirect {
 ```
 
 Execution: `output` collects the streams, `status` returns only the exit code,
-and `each_line` follows standard output as it is produced. Each exists on both
-`Cmd` and `Pipeline`, except `Cmd::status`.
+and `each_line` follows standard output as it is produced. All three exist on
+`Cmd`; `Pipeline` has `output` and `each_line`.
 
 `Cmd` and `Pipeline` are abstract and immutable. They are read back through
 `program()`, `arguments()`, `cwd()`, `env()`, `inherit_env()`, `stdin()`,
@@ -243,8 +243,10 @@ since every earlier stage's stdout is the pipe.
 
 `output` returns nothing until the command finishes. `each_line` delivers
 standard output line by line while the command runs, which is what a
-long-running build or test needs in order to report progress. Nothing is
-accumulated, so there is no capture limit.
+long-running build or test needs in order to report progress. Completed lines
+are not retained, so total output is unbounded; `max_line_bytes` (8 MiB by
+default) bounds the one line being assembled, so a child that never emits a
+newline cannot exhaust memory. Both `\n` and `\r\n` are recognised.
 
 ```mbt check
 ///|
