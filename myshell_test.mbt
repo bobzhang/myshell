@@ -536,19 +536,31 @@ async test "Graceful asks the child to stop, Kill does not" {
   // `/bin/sh` is named explicitly as the program to run; nothing is being
   // shell-interpreted on myshell's behalf. It is the simplest way to get a
   // child that reacts to SIGTERM observably.
-  let marker = "/tmp/myshell-graceful-marker"
-  // `wait` is interruptible by a trap, whereas a foreground `sleep` would make
-  // the shell defer the handler until it finished.
-  let handler =
-    #|trap 'printf stopped > /tmp/myshell-graceful-marker; exit 0' TERM
-    #|sleep 5 &
-    #|wait
   //
-  // A graceful cancellation delivers SIGTERM, so the handler runs.
-  @myshell.Cmd("rm", ["-f", marker]).status() |> ignore
+  // `mktemp -d` keeps the marker unique, so concurrent runs of this suite
+  // cannot satisfy or delete each other's assertion.
+  let directory = @myshell.Cmd("mktemp", ["-d"]).output().check().stdout
+    .trim()
+    .to_owned()
+  let marker = "\{directory}/stopped"
+  // The handler kills the background sleep before exiting, so a graceful stop
+  // leaves nothing behind. `wait` is what makes the trap reachable: a
+  // foreground `sleep` would make the shell defer the handler until it
+  // finished. The sleep is short so that the `Kill` case, which by definition
+  // never runs cleanup, orphans it only briefly — descendants are the host
+  // sandbox's job, as the README says.
+  let handler =
+    $|trap 'printf stopped > \{marker}; kill %1 2>/dev/null; exit 0' TERM
+    $|sleep 2 &
+    $|wait
+  //
+  // The timeout is generous relative to the microseconds a shell needs to
+  // install a trap. myshell has no spawn-and-continue API, so the parent
+  // cannot wait for a readiness signal before cancelling; the margin is the
+  // handshake.
   try
-    @myshell.Cmd("/bin/sh", ["-c", handler], cancel=Graceful(grace_ms=500)).output(
-      timeout_ms=50,
+    @myshell.Cmd("/bin/sh", ["-c", handler], cancel=Graceful(grace_ms=1000)).output(
+      timeout_ms=500,
     )
     |> ignore
   catch {
@@ -562,7 +574,7 @@ async test "Graceful asks the child to stop, Kill does not" {
   // The default kills outright, so the handler never gets to run.
   @myshell.Cmd("rm", ["-f", marker]).status() |> ignore
   try
-    @myshell.Cmd("/bin/sh", ["-c", handler]).output(timeout_ms=50) |> ignore
+    @myshell.Cmd("/bin/sh", ["-c", handler]).output(timeout_ms=500) |> ignore
   catch {
     @async.TimeoutError => ()
     _ => fail("unexpected error")
@@ -570,5 +582,5 @@ async test "Graceful asks the child to stop, Kill does not" {
     _ => fail("expected TimeoutError")
   }
   inspect(@myshell.Cmd("cat", [marker]).output().success(), content="false")
-  @myshell.Cmd("rm", ["-f", marker]).status() |> ignore
+  @myshell.Cmd("rm", ["-rf", directory]).status() |> ignore
 }

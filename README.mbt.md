@@ -330,9 +330,10 @@ async test {
 
 ## 13. Add a timeout
 
-A timeout cancels the structured task and immediately kills each direct child.
-It is not a process-tree deadline: descendants must be contained and reaped by
-the host's native process sandbox.
+A timeout cancels the structured task and stops each direct child according to
+its `cancel` policy, which kills immediately by default — see section 14 to ask
+a child to stop first instead. A timeout is not a process-tree deadline:
+descendants must be contained and reaped by the host's native process sandbox.
 
 ```mbt check
 ///|

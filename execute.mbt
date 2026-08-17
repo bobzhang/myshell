@@ -20,8 +20,9 @@ priv enum Sink {
 /// Constructing a `Cmd` does not execute it. Captured stdout and stderr share
 /// `max_output_bytes`; streams sent elsewhere by `stdout` or `stderr` do not
 /// count against it and arrive empty in `Output`. When `timeout_ms` expires,
-/// the direct child is killed immediately; descendants require enforcement by
-/// the host's native process sandbox.
+/// each direct child is stopped according to its `cancel` policy — immediately
+/// by default, or after a grace period under `Graceful`; descendants require
+/// enforcement by the host's native process sandbox.
 ///
 /// # Example
 /// ```mbt check
