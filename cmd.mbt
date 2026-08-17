@@ -31,6 +31,26 @@ pub(all) enum Redirect {
 } derive(Debug)
 
 ///|
+/// How a child is stopped when a run is cancelled.
+///
+/// Cancellation happens when a timeout expires, when a capture limit is
+/// exceeded, or when any stage of a pipeline fails.
+///
+/// `Kill` ends the child immediately and is the default, because a sandboxed
+/// runtime should not have to wait on an untrusted child. `Graceful` first asks
+/// the child to stop — `SIGTERM`, or `SIGBREAK` on Windows — and kills it only
+/// if it has not exited within `grace_ms`, which is what a child that must
+/// flush a file or release a lock needs.
+///
+/// A graceful teardown delays the cancelling call by up to `grace_ms`: a
+/// `timeout_ms` of 20 with `grace_ms` of 1000 raises `TimeoutError` after
+/// roughly a second, not after 20 milliseconds.
+pub(all) enum Cancel {
+  Kill
+  Graceful(grace_ms~ : Int)
+} derive(Debug)
+
+///|
 /// A shell-free process description.
 ///
 /// `program` is an executable name or path. Every element of `arguments` is
@@ -48,6 +68,7 @@ struct Cmd {
   stdin : Stdin?
   stdout : Redirect
   stderr : Redirect
+  cancel : Cancel
   no_console_window : Bool
 } derive(Debug)
 
@@ -82,6 +103,7 @@ pub fn Cmd::Cmd(
   stdin? : Stdin,
   stdout? : Redirect = Capture,
   stderr? : Redirect = Capture,
+  cancel? : Cancel = Kill,
   no_console_window? : Bool = false,
 ) -> Cmd {
   {
@@ -93,6 +115,7 @@ pub fn Cmd::Cmd(
     stdin,
     stdout,
     stderr,
+    cancel,
     no_console_window,
   }
 }
@@ -146,6 +169,12 @@ pub fn Cmd::stderr(self : Cmd) -> Redirect {
 }
 
 ///|
+/// How the child is stopped when the run is cancelled.
+pub fn Cmd::cancel(self : Cmd) -> Cancel {
+  self.cancel
+}
+
+///|
 /// Whether creation of a console window is suppressed on Windows.
 pub fn Cmd::no_console_window(self : Cmd) -> Bool {
   self.no_console_window
@@ -159,3 +188,6 @@ pub extend Stdin with @debug.Debug::{to_repr}
 
 ///|
 pub extend Redirect with @debug.Debug::{to_repr}
+
+///|
+pub extend Cancel with @debug.Debug::{to_repr}

@@ -27,6 +27,7 @@ test "defaults keep a command closed and inherited" {
       #|  stdin: None,
       #|  stdout: Capture,
       #|  stderr: Capture,
+      #|  cancel: Kill,
       #|  no_console_window: false,
       #|}
     ),
@@ -491,4 +492,96 @@ async test "a CRLF terminator does not consume the line allowance" {
   } noraise {
     _ => fail("expected OutputLimitExceeded")
   }
+}
+
+///|
+test "cancellation defaults to killing the child" {
+  debug_inspect(@myshell.Cmd("true", []).cancel(), content="Kill")
+  debug_inspect(
+    @myshell.Cmd("true", [], cancel=Graceful(grace_ms=500)).cancel(),
+    content="Graceful(grace_ms=500)",
+  )
+}
+
+///|
+async test "a negative grace period is rejected before spawning" {
+  try @myshell.Cmd("true", [], cancel=Graceful(grace_ms=-1)).status() catch {
+    @myshell.ProcessError::InvalidGracePeriod(grace_ms) =>
+      inspect(grace_ms, content="-1")
+    _ => fail("unexpected error")
+  } noraise {
+    _ => fail("expected InvalidGracePeriod")
+  }
+}
+
+///|
+#cfg(not(platform="windows"))
+async test "a graceful timeout still terminates the child" {
+  try
+    @myshell.Cmd("sleep", ["5"], cancel=Graceful(grace_ms=200)).output(
+      timeout_ms=20,
+    )
+    |> ignore
+  catch {
+    @async.TimeoutError => ()
+    _ => fail("unexpected error")
+  } noraise {
+    _ => fail("expected TimeoutError")
+  }
+}
+
+///|
+#cfg(not(platform="windows"))
+async test "Graceful asks the child to stop, Kill does not" {
+  // `/bin/sh` is named explicitly as the program to run; nothing is being
+  // shell-interpreted on myshell's behalf. It is the simplest way to get a
+  // child that reacts to SIGTERM observably.
+  //
+  // `mktemp -d` keeps the marker unique, so concurrent runs of this suite
+  // cannot satisfy or delete each other's assertion.
+  let directory = @myshell.Cmd("mktemp", ["-d"]).output().check().stdout
+    .trim()
+    .to_owned()
+  let marker = "\{directory}/stopped"
+  //
+  // Cancellation is driven by the capture limit rather than a timeout, which
+  // makes the ordering deterministic: the limit cannot be breached until the
+  // child has installed its trap and reported ready, so there is no race
+  // between setup and cancellation.
+  //
+  // The marker arrives as a positional argument rather than being interpolated
+  // into the script, so a `TMPDIR` containing spaces or metacharacters cannot
+  // change what the trap writes. The sleeper's pid is used instead of `kill
+  // %1`, because job control is off in a non-interactive shell and `%1` fails
+  // under dash. `wait` is what makes the trap reachable at all: a foreground
+  // `sleep` would defer the handler until it finished.
+  let script =
+    #|trap 'printf stopped > "$1"; kill "$sleeper" 2>/dev/null; exit 0' TERM
+    #|sleep 2 &
+    #|sleeper=$!
+    #|printf ready
+    #|wait
+  let cmd = (cancel : @myshell.Cancel) => {
+    @myshell.Cmd("/bin/sh", ["-c", script, "sh", marker], cancel~)
+  }
+  //
+  // A graceful cancellation delivers SIGTERM, so the handler runs.
+  try cmd(Graceful(grace_ms=1000)).output(max_output_bytes=1) |> ignore catch {
+    @myshell.ProcessError::OutputLimitExceeded(_) => ()
+    _ => fail("unexpected error")
+  } noraise {
+    _ => fail("expected OutputLimitExceeded")
+  }
+  inspect(@myshell.Cmd("cat", [marker]).output().stdout, content="stopped")
+  //
+  // The default kills outright, so the handler never gets to run.
+  @myshell.Cmd("rm", ["-f", marker]).status() |> ignore
+  try cmd(Kill).output(max_output_bytes=1) |> ignore catch {
+    @myshell.ProcessError::OutputLimitExceeded(_) => ()
+    _ => fail("unexpected error")
+  } noraise {
+    _ => fail("expected OutputLimitExceeded")
+  }
+  inspect(@myshell.Cmd("cat", [marker]).output().success(), content="false")
+  @myshell.Cmd("rm", ["-rf", directory]).status() |> ignore
 }

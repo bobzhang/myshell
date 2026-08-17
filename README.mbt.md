@@ -58,6 +58,7 @@ Cmd(
   stdin? : Stdin,          // default: closed
   stdout? : Redirect,      // default: Capture
   stderr? : Redirect,      // default: Capture
+  cancel? : Cancel,        // default: Kill
   no_console_window? : Bool, // default: false, Windows only
 ) -> Cmd
 
@@ -87,7 +88,7 @@ and `each_line` follows standard output as it is produced. All three exist on
 
 `Cmd` and `Pipeline` are abstract and immutable. They are read back through
 `program()`, `arguments()`, `cwd()`, `env()`, `inherit_env()`, `stdin()`,
-`stdout()`, `stderr()`, `no_console_window()`, and `commands()` — so a plan that
+`stdout()`, `stderr()`, `cancel()`, `no_console_window()`, and `commands()` — so a plan that
 has been inspected is the same plan that runs. `Output`, `Stdin`, and `Redirect`
 are transparent, because a result is data and a stream setting is a choice.
 
@@ -329,9 +330,10 @@ async test {
 
 ## 13. Add a timeout
 
-A timeout cancels the structured task and immediately kills each direct child.
-It is not a process-tree deadline: descendants must be contained and reaped by
-the host's native process sandbox.
+A timeout cancels the structured task and stops each direct child according to
+its `cancel` policy, which kills immediately by default — see section 14 to ask
+a child to stop first instead. A timeout is not a process-tree deadline:
+descendants must be contained and reaped by the host's native process sandbox.
 
 ```mbt check
 ///|
@@ -357,6 +359,28 @@ let output = command.output(max_output_bytes=32 * 1024 * 1024)
 
 If all captured streams together exceed the limit, execution raises
 `ProcessError::OutputLimitExceeded` and cancels the structured process group.
+
+## 14. Choose how a cancelled child is stopped
+
+Cancellation — from a timeout, a capture limit, or a failing pipeline stage —
+kills the child outright by default, so a sandboxed runtime never waits on an
+untrusted process. `Graceful` instead asks the child to stop first, with
+`SIGTERM` (or `SIGBREAK` on Windows), and kills it only if it is still running
+after `grace_ms`. That is what a child needs in order to flush a file or
+release a lock.
+
+```mbt check
+///|
+test {
+  let command = @myshell.Cmd("moon", ["check"], cancel=Graceful(grace_ms=2000))
+  debug_inspect(command.cancel(), content="Graceful(grace_ms=2000)")
+}
+```
+
+A graceful teardown delays the cancelling call by up to `grace_ms`, so a
+`timeout_ms` of 20 with a `grace_ms` of 1000 raises `TimeoutError` after about a
+second rather than after 20 milliseconds. As with any timeout, this reaches only
+the direct child; descendants remain the host sandbox's responsibility.
 
 ## One-file use
 

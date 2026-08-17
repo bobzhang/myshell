@@ -14,6 +14,7 @@ pub(all) suberror ProcessError {
   EmptyPipeline
   InvalidEnvironmentName(String)
   InvalidOutputLimit(Int)
+  InvalidGracePeriod(Int)
   OutputLimitExceeded(stream~ : String, limit~ : Int)
   NulByte(String)
   StdinOnNonFirstStage(Int)
@@ -24,9 +25,16 @@ pub(all) suberror ProcessError {
 pub fn ProcessError::to_repr(Self) -> @debug.Repr
 
 // Types and methods
+pub(all) enum Cancel {
+  Kill
+  Graceful(grace_ms~ : Int)
+} derive(@debug.Debug)
+pub fn Cancel::to_repr(Self) -> @debug.Repr
+
 type Cmd derive(@debug.Debug)
-pub fn Cmd::Cmd(String, Array[String], cwd? : String, env? : Map[String, String], inherit_env? : Bool, stdin? : Stdin, stdout? : Redirect, stderr? : Redirect, no_console_window? : Bool) -> Self
+pub fn Cmd::Cmd(String, Array[String], cwd? : String, env? : Map[String, String], inherit_env? : Bool, stdin? : Stdin, stdout? : Redirect, stderr? : Redirect, cancel? : Cancel, no_console_window? : Bool) -> Self
 pub fn Cmd::arguments(Self) -> ArrayView[String]
+pub fn Cmd::cancel(Self) -> Cancel
 pub fn Cmd::cwd(Self) -> String?
 pub async fn Cmd::each_line(Self, async (String) -> Unit, timeout_ms? : Int, max_line_bytes? : Int) -> Int
 pub fn Cmd::env(Self) -> Map[String, String]
