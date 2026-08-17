@@ -543,43 +543,44 @@ async test "Graceful asks the child to stop, Kill does not" {
     .trim()
     .to_owned()
   let marker = "\{directory}/stopped"
-  // The handler kills the background sleep before exiting, so a graceful stop
-  // leaves nothing behind. `wait` is what makes the trap reachable: a
-  // foreground `sleep` would make the shell defer the handler until it
-  // finished. The sleep is short so that the `Kill` case, which by definition
-  // never runs cleanup, orphans it only briefly — descendants are the host
-  // sandbox's job, as the README says.
-  let handler =
-    $|trap 'printf stopped > \{marker}; kill %1 2>/dev/null; exit 0' TERM
-    $|sleep 2 &
-    $|wait
   //
-  // The timeout is generous relative to the microseconds a shell needs to
-  // install a trap. myshell has no spawn-and-continue API, so the parent
-  // cannot wait for a readiness signal before cancelling; the margin is the
-  // handshake.
-  try
-    @myshell.Cmd("/bin/sh", ["-c", handler], cancel=Graceful(grace_ms=1000)).output(
-      timeout_ms=500,
-    )
-    |> ignore
-  catch {
-    @async.TimeoutError => ()
+  // Cancellation is driven by the capture limit rather than a timeout, which
+  // makes the ordering deterministic: the limit cannot be breached until the
+  // child has installed its trap and reported ready, so there is no race
+  // between setup and cancellation.
+  //
+  // The marker arrives as a positional argument rather than being interpolated
+  // into the script, so a `TMPDIR` containing spaces or metacharacters cannot
+  // change what the trap writes. The sleeper's pid is used instead of `kill
+  // %1`, because job control is off in a non-interactive shell and `%1` fails
+  // under dash. `wait` is what makes the trap reachable at all: a foreground
+  // `sleep` would defer the handler until it finished.
+  let script =
+    #|trap 'printf stopped > "$1"; kill "$sleeper" 2>/dev/null; exit 0' TERM
+    #|sleep 2 &
+    #|sleeper=$!
+    #|printf ready
+    #|wait
+  let cmd = (cancel : @myshell.Cancel) => {
+    @myshell.Cmd("/bin/sh", ["-c", script, "sh", marker], cancel~)
+  }
+  //
+  // A graceful cancellation delivers SIGTERM, so the handler runs.
+  try cmd(Graceful(grace_ms=1000)).output(max_output_bytes=1) |> ignore catch {
+    @myshell.ProcessError::OutputLimitExceeded(_) => ()
     _ => fail("unexpected error")
   } noraise {
-    _ => fail("expected TimeoutError")
+    _ => fail("expected OutputLimitExceeded")
   }
   inspect(@myshell.Cmd("cat", [marker]).output().stdout, content="stopped")
   //
   // The default kills outright, so the handler never gets to run.
   @myshell.Cmd("rm", ["-f", marker]).status() |> ignore
-  try
-    @myshell.Cmd("/bin/sh", ["-c", handler]).output(timeout_ms=500) |> ignore
-  catch {
-    @async.TimeoutError => ()
+  try cmd(Kill).output(max_output_bytes=1) |> ignore catch {
+    @myshell.ProcessError::OutputLimitExceeded(_) => ()
     _ => fail("unexpected error")
   } noraise {
-    _ => fail("expected TimeoutError")
+    _ => fail("expected OutputLimitExceeded")
   }
   inspect(@myshell.Cmd("cat", [marker]).output().success(), content="false")
   @myshell.Cmd("rm", ["-rf", directory]).status() |> ignore
