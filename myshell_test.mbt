@@ -14,6 +14,12 @@ test "command builders are immutable and literal" {
   inspect(configured.environment()["LC_ALL"], content="C")
   inspect(configured.inherits_environment(), content="false")
   debug_inspect(configured.standard_input(), content="Some(\"input\")")
+  let binary = base.stdin_bytes(b"\x00\xff")
+  debug_inspect(binary.standard_input(), content="None")
+  guard binary.standard_input_bytes() is Some(input) else {
+    fail("expected binary standard input")
+  }
+  assert_eq(input, b"\x00\xff")
 }
 
 ///|
@@ -56,6 +62,20 @@ async test "run supplies stdin, cwd, and environment" {
   inspect(env_output.stdout.trim(), content="works")
   let cwd_output = @myshell.Cmd::Cmd("pwd", []).cwd(".").output()
   inspect(cwd_output.stdout.trim().has_suffix("/myshell"), content="true")
+}
+
+///|
+#cfg(not(platform="windows"))
+async test "run supplies binary stdin" {
+  let output = @myshell.Cmd::Cmd("cat", []).stdin_bytes(b"\x00\xff").output()
+  assert_eq(output.stdout_bytes, b"\x00\xff")
+}
+
+///|
+#cfg(not(platform="windows"))
+async test "status returns the exit code without capture" {
+  inspect(@myshell.Cmd::Cmd("true", []).status(), content="0")
+  inspect(@myshell.Cmd::Cmd("false", []).status(), content="1")
 }
 
 ///|

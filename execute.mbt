@@ -35,6 +35,22 @@ pub async fn Cmd::output(
 }
 
 ///|
+/// Execute this command without capturing stdout or stderr.
+///
+/// The child inherits the current process's stdout and stderr, and this method
+/// returns only its exit status. Standard input is closed by default; `stdin`
+/// and `stdin_bytes` still apply. Use `output` when captured data is needed.
+pub async fn Cmd::status(self : Cmd, timeout_ms? : Int) -> Int {
+  let cmd = self.snapshot()
+  validate_cmd(cmd)
+  match timeout_ms {
+    None => run_status(cmd)
+    Some(milliseconds) =>
+      @async.with_timeout(milliseconds, () => run_status(cmd))
+  }
+}
+
+///|
 /// Execute this pipeline and capture final stdout plus every stage's stderr.
 ///
 /// Stages use real operating-system pipes and run concurrently in one
@@ -52,7 +68,7 @@ pub async fn Pipeline::output(
   validate_output_limit(max_output_bytes)
   for index, cmd in pipeline.commands_ {
     validate_cmd(cmd)
-    if index > 0 && cmd.stdin_ is Some(_) {
+    if index > 0 && (cmd.stdin_text_ is Some(_) || cmd.stdin_bytes_ is Some(_)) {
       raise StdinOnNonFirstStage(index)
     }
   }
@@ -160,6 +176,42 @@ async fn[X] spawn_stage(
 }
 
 ///|
+async fn write_standard_input(
+  writer : @pipe.PipeWrite,
+  text : String?,
+  bytes : Bytes?,
+) -> Unit {
+  defer writer.close()
+  match (text, bytes) {
+    (Some(text), _) => writer.write(text)
+    (None, Some(bytes)) => writer.write(bytes)
+    (None, None) => ()
+  }
+}
+
+///|
+async fn run_status(cmd : Cmd) -> Int {
+  let (stdin_reader, stdin_writer) = @pipe.pipe()
+  defer stdin_reader.close()
+  defer stdin_writer.close()
+  @async.with_task_group() <| group => {
+    group.spawn_bg(allow_failure=true, () => {
+      write_standard_input(stdin_writer, cmd.stdin_text_, cmd.stdin_bytes_)
+    })
+    @process.run(
+      cmd.program_,
+      cmd.arguments_,
+      extra_env=cmd.environment_,
+      inherit_env=cmd.inherit_environment_,
+      stdin=stdin_reader,
+      cwd?=cmd.cwd_.map(directory => directory[:]),
+      no_console_window=cmd.no_console_window_,
+      cancel_handler=@process.hard_cancel(),
+    )
+  }
+}
+
+///|
 fn pipefail_exit_code(exit_codes : ArrayView[Int]) -> Int {
   let mut result = 0
   for code in exit_codes {
@@ -240,13 +292,13 @@ async fn run_pipeline(pipeline : Pipeline, max_output_bytes : Int) -> Output {
         }),
       )
     }
-    group.spawn_bg(allow_failure=true) <| () => {
-      defer first_stdin_writer.close()
-      match commands[0].stdin_ {
-        Some(input) => first_stdin_writer.write(input)
-        None => ()
-      }
-    }
+    group.spawn_bg(allow_failure=true, () => {
+      write_standard_input(
+        first_stdin_writer,
+        commands[0].stdin_text_,
+        commands[0].stdin_bytes_,
+      )
+    })
     let processes : Array[@process.Process] = []
     for index, cmd in commands {
       let stdin = if index == 0 {

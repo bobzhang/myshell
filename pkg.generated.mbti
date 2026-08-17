@@ -38,7 +38,10 @@ pub async fn Cmd::output(Self, timeout_ms? : Int, max_output_bytes? : Int) -> Ou
 pub fn Cmd::pipe(Self, Self) -> Pipeline
 pub fn Cmd::program(Self) -> String
 pub fn Cmd::standard_input(Self) -> String?
+pub fn Cmd::standard_input_bytes(Self) -> Bytes?
+pub async fn Cmd::status(Self, timeout_ms? : Int) -> Int
 pub fn Cmd::stdin(Self, String) -> Self
+pub fn Cmd::stdin_bytes(Self, Bytes) -> Self
 pub fn Cmd::working_directory(Self) -> String?
 
 pub struct Output {

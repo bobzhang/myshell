@@ -132,6 +132,17 @@ async test {
 }
 ```
 
+Use `stdin_bytes` when the input is not text:
+
+```mbt check
+///|
+#cfg(not(platform="windows"))
+async test {
+  let output = Cmd::Cmd("cat", []).stdin_bytes(b"\x00\xff").output()
+  assert_eq(output.stdout_bytes, b"\x00\xff")
+}
+```
+
 ## 6. Set cwd and environment
 
 ```mbt check
@@ -147,7 +158,23 @@ test {
 
 Use `.clear_env()` before `.env(...)` to start with an empty environment.
 
-## 7. Inspect exit status
+## 7. Run without capturing output
+
+Use `status` when stdout and stderr should be inherited by the current process.
+It returns only the exit code and has no capture limit.
+
+```mbt check
+///|
+#cfg(not(platform="windows"))
+async test {
+  assert_eq(Cmd::Cmd("false", []).status(), 1)
+}
+```
+
+`Process::run` and `Process::pipeline` remain as deprecated compatibility entry
+points for `0.1` callers.
+
+## 8. Inspect exit status
 
 `Cmd::output` does not turn a non-zero exit status into an exception. Use
 ordinary MoonBit control flow or call `check()` when failure should raise.
@@ -163,7 +190,7 @@ async test {
 }
 ```
 
-## 8. Pipeline status uses pipefail
+## 9. Pipeline status uses pipefail
 
 `exit_code` is the rightmost non-zero stage status, or zero when all stages
 succeed. Every individual status remains available in `stage_exit_codes`.
@@ -178,7 +205,7 @@ async test {
 }
 ```
 
-## 9. Capture stderr
+## 10. Capture stderr
 
 For pipelines, `stage_stderr` preserves one string per stage and `stderr`
 concatenates them in stage order. Raw output remains available as
@@ -197,7 +224,7 @@ async test {
 }
 ```
 
-## 10. Add a timeout
+## 11. Add a timeout
 
 A timeout cancels the structured task and immediately kills each direct child.
 It is not a process-tree deadline: descendants must be contained and reaped by

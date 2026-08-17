@@ -10,7 +10,8 @@ struct Cmd {
   cwd_ : String?
   environment_ : Map[String, String]
   inherit_environment_ : Bool
-  stdin_ : String?
+  stdin_text_ : String?
+  stdin_bytes_ : Bytes?
   no_console_window_ : Bool
 } derive(Debug)
 
@@ -33,7 +34,8 @@ pub fn Cmd::Cmd(program : String, arguments : Array[String]) -> Cmd {
     cwd_: None,
     environment_: {},
     inherit_environment_: true,
-    stdin_: None,
+    stdin_text_: None,
+    stdin_bytes_: None,
     no_console_window_: false,
   }
 }
@@ -49,7 +51,8 @@ pub fn Cmd::arg(self : Cmd, argument : String) -> Cmd {
     cwd_: self.cwd_,
     environment_: self.environment_.copy(),
     inherit_environment_: self.inherit_environment_,
-    stdin_: self.stdin_,
+    stdin_text_: self.stdin_text_,
+    stdin_bytes_: self.stdin_bytes_,
     no_console_window_: self.no_console_window_,
   }
 }
@@ -67,7 +70,8 @@ pub fn Cmd::args(self : Cmd, arguments : ArrayView[String]) -> Cmd {
     cwd_: self.cwd_,
     environment_: self.environment_.copy(),
     inherit_environment_: self.inherit_environment_,
-    stdin_: self.stdin_,
+    stdin_text_: self.stdin_text_,
+    stdin_bytes_: self.stdin_bytes_,
     no_console_window_: self.no_console_window_,
   }
 }
@@ -81,7 +85,8 @@ pub fn Cmd::cwd(self : Cmd, directory : String) -> Cmd {
     cwd_: Some(directory),
     environment_: self.environment_.copy(),
     inherit_environment_: self.inherit_environment_,
-    stdin_: self.stdin_,
+    stdin_text_: self.stdin_text_,
+    stdin_bytes_: self.stdin_bytes_,
     no_console_window_: self.no_console_window_,
   }
 }
@@ -97,7 +102,8 @@ pub fn Cmd::env(self : Cmd, name : String, value : String) -> Cmd {
     cwd_: self.cwd_,
     environment_: environment,
     inherit_environment_: self.inherit_environment_,
-    stdin_: self.stdin_,
+    stdin_text_: self.stdin_text_,
+    stdin_bytes_: self.stdin_bytes_,
     no_console_window_: self.no_console_window_,
   }
 }
@@ -113,7 +119,8 @@ pub fn Cmd::envs(self : Cmd, environment : Map[String, String]) -> Cmd {
     cwd_: self.cwd_,
     environment_: all_environment,
     inherit_environment_: self.inherit_environment_,
-    stdin_: self.stdin_,
+    stdin_text_: self.stdin_text_,
+    stdin_bytes_: self.stdin_bytes_,
     no_console_window_: self.no_console_window_,
   }
 }
@@ -129,7 +136,8 @@ pub fn Cmd::clear_env(self : Cmd) -> Cmd {
     cwd_: self.cwd_,
     environment_: self.environment_.copy(),
     inherit_environment_: false,
-    stdin_: self.stdin_,
+    stdin_text_: self.stdin_text_,
+    stdin_bytes_: self.stdin_bytes_,
     no_console_window_: self.no_console_window_,
   }
 }
@@ -143,7 +151,25 @@ pub fn Cmd::stdin(self : Cmd, input : String) -> Cmd {
     cwd_: self.cwd_,
     environment_: self.environment_.copy(),
     inherit_environment_: self.inherit_environment_,
-    stdin_: Some(input),
+    stdin_text_: Some(input),
+    stdin_bytes_: None,
+    no_console_window_: self.no_console_window_,
+  }
+}
+
+///|
+/// Return a copy that receives arbitrary bytes on standard input.
+///
+/// Calling `stdin` or `stdin_bytes` replaces any previously configured input.
+pub fn Cmd::stdin_bytes(self : Cmd, input : Bytes) -> Cmd {
+  {
+    program_: self.program_,
+    arguments_: self.arguments_.copy(),
+    cwd_: self.cwd_,
+    environment_: self.environment_.copy(),
+    inherit_environment_: self.inherit_environment_,
+    stdin_text_: None,
+    stdin_bytes_: Some(input),
     no_console_window_: self.no_console_window_,
   }
 }
@@ -159,7 +185,8 @@ pub fn Cmd::no_console_window(self : Cmd) -> Cmd {
     cwd_: self.cwd_,
     environment_: self.environment_.copy(),
     inherit_environment_: self.inherit_environment_,
-    stdin_: self.stdin_,
+    stdin_text_: self.stdin_text_,
+    stdin_bytes_: self.stdin_bytes_,
     no_console_window_: true,
   }
 }
@@ -203,7 +230,13 @@ pub fn Cmd::inherits_environment(self : Cmd) -> Bool {
 ///|
 /// Return the configured standard input text, if any.
 pub fn Cmd::standard_input(self : Cmd) -> String? {
-  self.stdin_
+  self.stdin_text_
+}
+
+///|
+/// Return the configured standard input bytes, if `stdin_bytes` was used.
+pub fn Cmd::standard_input_bytes(self : Cmd) -> Bytes? {
+  self.stdin_bytes_
 }
 
 ///|
@@ -218,7 +251,8 @@ fn Cmd::snapshot(self : Cmd) -> Cmd {
     cwd_: self.cwd_,
     environment_: self.environment_.copy(),
     inherit_environment_: self.inherit_environment_,
-    stdin_: self.stdin_,
+    stdin_text_: self.stdin_text_,
+    stdin_bytes_: self.stdin_bytes_,
     no_console_window_: self.no_console_window_,
   }
 }
