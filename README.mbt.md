@@ -42,13 +42,41 @@ import {
 
 Use an `async fn main`; MoonBit async code does not use an `await` keyword.
 
+## The whole API
+
+A process is described by one constructor and executed by one method. There are
+no builder chains: a `Cmd` is written the way it is read.
+
+```moonbit nocheck
+///|
+Cmd(
+  program,                 // executable name or path
+  arguments,               // Array[String], each passed literally
+  cwd? : String,           // default: inherited working directory
+  env? : Map[String, String], // default: {}
+  inherit_env? : Bool,     // default: true
+  stdin? : Stdin,          // default: closed
+  no_console_window? : Bool, // default: false, Windows only
+) -> Cmd
+
+Pipeline(commands : Array[Cmd]) -> Pipeline
+```
+
+Execution: `Cmd::output`, `Cmd::status`, `Pipeline::output`.
+
+`Cmd` and `Pipeline` are abstract and immutable. They are read back through
+`program()`, `arguments()`, `cwd()`, `env()`, `inherit_env()`, `stdin()`,
+`no_console_window()`, and `commands()` — so a plan that has been inspected is
+the same plan that runs. `Output` and `Stdin` are transparent, because a result
+is data and an input mode is a choice.
+
 ## 1. Run one command
 
 ```mbt check
 ///|
 #cfg(not(platform="windows"))
 async test {
-  let output = Cmd::Cmd("printf", ["hello"]).output()
+  let output = @myshell.Cmd("printf", ["hello"]).output()
   assert_eq(output.exit_code, 0)
   assert_eq(output.stdout, "hello")
 }
@@ -63,28 +91,61 @@ pipe.
 ///|
 #cfg(not(platform="windows"))
 async test {
-  let output = Cmd::Cmd("printf", ["%s", "$(echo no) | *"]).output()
+  let output = @myshell.Cmd("printf", ["%s", "$(echo no) | *"]).output()
   assert_eq(output.stdout, "$(echo no) | *")
 }
 ```
 
-## 3. Add arguments
+## 3. Set cwd and environment
 
-Builders return copies, so a reusable base command is not mutated.
+Options are labelled arguments on the constructor, so the whole plan is one
+expression.
 
 ```mbt check
 ///|
 test {
-  let git = Cmd::Cmd("git", [])
-  let status = git.args(["status", "--short"])
-  let diff = git.arg("diff")
-  debug_inspect(status.arguments(), content="[\"status\", \"--short\"]")
-  debug_inspect(diff.arguments(), content="[\"diff\"]")
-  debug_inspect(git.arguments(), content="[]")
+  let command = @myshell.Cmd("moon", ["check"], cwd="workspace", env={
+    "NO_COLOR": "1",
+  })
+  debug_inspect(command.cwd(), content="Some(\"workspace\")")
+  assert_eq(command.env()["NO_COLOR"], "1")
 }
 ```
 
-## 4. Pipe commands
+Pass `inherit_env=false` to start from an empty environment instead of adding
+to the parent's.
+
+## 4. Inspect a plan before running it
+
+A plan can be logged, diffed, or checked against a policy before anything is
+spawned. Because `Cmd` is immutable, nothing can change it between the check
+and the run.
+
+```mbt check
+///|
+test {
+  let command = @myshell.Cmd("rm", ["-rf", "/"])
+  assert_eq(command.program(), "rm")
+  assert_eq(command.arguments().length(), 2)
+}
+```
+
+Building a command list is ordinary MoonBit; there is no builder to learn.
+
+```mbt check
+///|
+test {
+  let arguments = ["check"]
+  if true {
+    arguments.push("--target")
+    arguments.push("wasm")
+  }
+  let command = @myshell.Cmd("moon", arguments)
+  assert_eq(command.arguments(), ["check", "--target", "wasm"])
+}
+```
+
+## 5. Pipe commands
 
 Every stage is separately visible to the process host. The stages use real
 operating-system pipes and run concurrently in one structured task group.
@@ -93,70 +154,44 @@ operating-system pipes and run concurrently in one structured task group.
 ///|
 #cfg(not(platform="windows"))
 async test {
-  let plan = Pipeline::Pipeline([
+  let output = @myshell.Pipeline([
     Cmd("printf", ["alpha\nbeta\n"]),
     Cmd("grep", ["beta"]),
     Cmd("tr", ["a-z", "A-Z"]),
-  ])
-  let output = plan.output()
+  ]).output()
   assert_eq(output.stdout, "BETA\n")
   assert_eq(output.stage_exit_codes, [0, 0, 0])
 }
 ```
 
-The equivalent incremental form is deliberately ordinary:
-
-```mbt check
-///|
-test {
-  let plan = Cmd::Cmd("printf", ["hello"])
-    .pipe(Cmd("cat", []))
-    .pipe(Cmd("wc", ["-c"]))
-  assert_eq(plan.commands().length(), 3)
-}
-```
-
-## 5. Supply standard input
+## 6. Supply standard input
 
 Standard input is closed by default, so non-interactive runs cannot
 accidentally wait on ambient input. `stdin` on the first stage also feeds a
-pipeline.
+pipeline; giving it to a later stage is rejected.
 
 ```mbt check
 ///|
 #cfg(not(platform="windows"))
 async test {
-  let plan = Cmd::Cmd("cat", []).stdin("hello").pipe(Cmd("tr", ["a-z", "A-Z"]))
-  let output = plan.output()
+  let output = @myshell.Pipeline([
+    Cmd("cat", [], stdin=Text("hello")),
+    Cmd("tr", ["a-z", "A-Z"]),
+  ]).output()
   assert_eq(output.stdout, "HELLO")
 }
 ```
 
-Use `stdin_bytes` when the input is not text:
+Use `Binary` when the input is not text:
 
 ```mbt check
 ///|
 #cfg(not(platform="windows"))
 async test {
-  let output = Cmd::Cmd("cat", []).stdin_bytes(b"\x00\xff").output()
+  let output = @myshell.Cmd("cat", [], stdin=Binary(b"\x00\xff")).output()
   assert_eq(output.stdout_bytes, b"\x00\xff")
 }
 ```
-
-## 6. Set cwd and environment
-
-```mbt check
-///|
-test {
-  let command = Cmd::Cmd("tool", ["check"])
-    .cwd("workspace")
-    .env("NO_COLOR", "1")
-  debug_inspect(command.working_directory(), content="Some(\"workspace\")")
-  assert_eq(command.environment()["NO_COLOR"], "1")
-}
-```
-
-Use `.clear_env()` before `.env(...)` to start with an empty environment.
 
 ## 7. Run without capturing output
 
@@ -167,12 +202,9 @@ It returns only the exit code and has no capture limit.
 ///|
 #cfg(not(platform="windows"))
 async test {
-  assert_eq(Cmd::Cmd("false", []).status(), 1)
+  assert_eq(@myshell.Cmd("false", []).status(), 1)
 }
 ```
-
-`Process::run` and `Process::pipeline` remain as deprecated compatibility entry
-points for `0.1` callers.
 
 ## 8. Inspect exit status
 
@@ -183,7 +215,7 @@ ordinary MoonBit control flow or call `check()` when failure should raise.
 ///|
 #cfg(not(platform="windows"))
 async test {
-  let output = Cmd::Cmd("false", []).output()
+  let output = @myshell.Cmd("false", []).output()
   if !output.success() {
     assert_eq(output.exit_code, 1)
   }
@@ -199,7 +231,7 @@ succeed. Every individual status remains available in `stage_exit_codes`.
 ///|
 #cfg(not(platform="windows"))
 async test {
-  let output = Pipeline::Pipeline([Cmd("false", []), Cmd("cat", [])]).output()
+  let output = @myshell.Pipeline([Cmd("false", []), Cmd("cat", [])]).output()
   assert_eq(output.exit_code, 1)
   assert_eq(output.stage_exit_codes, [1, 0])
 }
@@ -208,15 +240,15 @@ async test {
 ## 10. Capture stderr
 
 For pipelines, `stage_stderr` preserves one string per stage and `stderr`
-concatenates them in stage order. Raw output remains available as
-`stdout_bytes`, `stderr_bytes`, and `stage_stderr_bytes`; the text fields use
-lossy UTF-8 decoding so arbitrary process output cannot cancel sibling stages.
+concatenates them in stage order. Exact bytes remain available as
+`stdout_bytes` and `stage_stderr_bytes`; the text fields use lossy UTF-8
+decoding so arbitrary process output cannot cancel sibling stages.
 
 ```mbt check
 ///|
 #cfg(not(platform="windows"))
 async test {
-  let output = Cmd::Cmd("/usr/bin/grep", [
+  let output = @myshell.Cmd("/usr/bin/grep", [
     "needle", "/definitely/not/a/real/myshell-file",
   ]).output()
   assert_true(!output.stderr.is_empty())
@@ -234,7 +266,7 @@ the host's native process sandbox.
 ///|
 #cfg(not(platform="windows"))
 async test {
-  try Cmd::Cmd("sleep", ["1"]).output(timeout_ms=20) catch {
+  try @myshell.Cmd("sleep", ["1"]).output(timeout_ms=20) catch {
     @async.TimeoutError => ()
     _ => fail("expected TimeoutError")
   } noraise {
@@ -267,9 +299,9 @@ moon run -e 'import {
 }
 
 async fn main {
-  let output = @myshell.Pipeline::Pipeline([
-    @myshell.Cmd::Cmd("/usr/bin/printf", ["hello\nworld\n"]).clear_env(),
-    @myshell.Cmd::Cmd("/usr/bin/grep", ["world"]).clear_env(),
+  let output = @myshell.Pipeline([
+    @myshell.Cmd("/usr/bin/printf", ["hello\nworld\n"], inherit_env=false),
+    @myshell.Cmd("/usr/bin/grep", ["world"], inherit_env=false),
   ]).output()
   print(output.stdout)
 }'
@@ -278,10 +310,14 @@ async fn main {
 ## Security boundary
 
 This package removes shell parsing and keeps each process invocation structured;
-it does not decide which executables or effects are safe. On `wasm`, the host
-still owns executable authorization and the native process sandbox. A strong
-deployment should grant each child only the filesystem, network, environment,
-and secret capabilities required for that invocation.
+it does not decide which executables or effects are safe. Because a `Cmd` is
+immutable and fully readable, a caller can apply its own policy to a plan
+before calling `output` or `status` — the description and the execution are
+separate steps.
+
+On `wasm`, the host still owns executable authorization and the native process
+sandbox. A strong deployment should grant each child only the filesystem,
+network, environment, and secret capabilities required for that invocation.
 
 MoonBit's current `moonrun` policy gates process spawning as a boolean. Enabling
 `process.spawn` does **not** apply the policy's filesystem or network restrictions

@@ -1,53 +1,53 @@
 ///|
-/// Namespace for executing `Cmd` and `Pipeline` values.
-///
-/// Constructing a command does not execute it. Execution only happens through
-/// these methods, which delegate each process to `moonbitlang/async/process`.
-pub enum Process {}
-
-///|
 /// Default aggregate limit for captured stdout and stderr: 8 MiB.
 pub let default_max_output_bytes : Int = 8 * 1024 * 1024
 
 ///|
 /// Execute this command and capture stdout and stderr.
 ///
-/// Standard input is closed by default. Use `Cmd::stdin` to supply text.
-/// Captured stdout and stderr share `max_output_bytes`. When `timeout_ms`
-/// expires, the direct child is killed immediately; descendants require
-/// enforcement by the host's native process sandbox.
+/// Constructing a `Cmd` does not execute it. Captured stdout and stderr share
+/// `max_output_bytes`. When `timeout_ms` expires, the direct child is killed
+/// immediately; descendants require enforcement by the host's native process
+/// sandbox.
+///
+/// # Example
+/// ```mbt check
+/// #cfg(not(platform="windows"))
+/// async test {
+///   let output = @myshell.Cmd("printf", ["hello"]).output()
+///   assert_eq(output.stdout, "hello")
+/// }
+/// ```
 pub async fn Cmd::output(
   self : Cmd,
   timeout_ms? : Int,
   max_output_bytes? : Int = default_max_output_bytes,
 ) -> Output {
-  let cmd = self.snapshot()
-  validate_cmd(cmd)
+  validate_cmd(self)
   validate_output_limit(max_output_bytes)
-  let pipeline = Pipeline::Pipeline([cmd])
-  match timeout_ms {
-    None => run_pipeline(pipeline, max_output_bytes)
-    Some(milliseconds) =>
-      @async.with_timeout(milliseconds, () => {
-        run_pipeline(pipeline, max_output_bytes)
-      })
-  }
+  let pipeline = { commands: [self] }
+  with_optional_timeout(timeout_ms, () => {
+    run_pipeline(pipeline, max_output_bytes)
+  })
 }
 
 ///|
 /// Execute this command without capturing stdout or stderr.
 ///
 /// The child inherits the current process's stdout and stderr, and this method
-/// returns only its exit status. Standard input is closed by default; `stdin`
-/// and `stdin_bytes` still apply. Use `output` when captured data is needed.
+/// returns only its exit status. `stdin` still applies. Use `output` when
+/// captured data is needed.
+///
+/// # Example
+/// ```mbt check
+/// #cfg(not(platform="windows"))
+/// async test {
+///   assert_eq(@myshell.Cmd("false", []).status(), 1)
+/// }
+/// ```
 pub async fn Cmd::status(self : Cmd, timeout_ms? : Int) -> Int {
-  let cmd = self.snapshot()
-  validate_cmd(cmd)
-  match timeout_ms {
-    None => run_status(cmd)
-    Some(milliseconds) =>
-      @async.with_timeout(milliseconds, () => run_status(cmd))
-  }
+  validate_cmd(self)
+  with_optional_timeout(timeout_ms, () => run_status(self))
 }
 
 ///|
@@ -56,83 +56,61 @@ pub async fn Cmd::status(self : Cmd, timeout_ms? : Int) -> Int {
 /// Stages use real operating-system pipes and run concurrently in one
 /// structured task group. `timeout_ms`, when present, applies to the whole
 /// pipeline.
+///
+/// # Example
+/// ```mbt check
+/// #cfg(not(platform="windows"))
+/// async test {
+///   let output = @myshell.Pipeline([
+///     Cmd("printf", ["alpha\nbeta\n"]),
+///     Cmd("grep", ["beta"]),
+///   ]).output()
+///   assert_eq(output.stdout, "beta\n")
+/// }
+/// ```
 pub async fn Pipeline::output(
   self : Pipeline,
   timeout_ms? : Int,
   max_output_bytes? : Int = default_max_output_bytes,
 ) -> Output {
-  let pipeline = self.snapshot()
-  if pipeline.commands_.is_empty() {
+  if self.commands.is_empty() {
     raise ProcessError::EmptyPipeline
   }
   validate_output_limit(max_output_bytes)
-  for index, cmd in pipeline.commands_ {
+  for index, cmd in self.commands {
     validate_cmd(cmd)
-    if index > 0 && (cmd.stdin_text_ is Some(_) || cmd.stdin_bytes_ is Some(_)) {
+    if index > 0 && cmd.stdin is Some(_) {
       raise StdinOnNonFirstStage(index)
     }
   }
+  with_optional_timeout(timeout_ms, () => run_pipeline(self, max_output_bytes))
+}
+
+///|
+async fn[X] with_optional_timeout(timeout_ms : Int?, body : async () -> X) -> X {
   match timeout_ms {
-    None => run_pipeline(pipeline, max_output_bytes)
-    Some(milliseconds) =>
-      @async.with_timeout(milliseconds, () => {
-        run_pipeline(pipeline, max_output_bytes)
-      })
+    None => body()
+    Some(milliseconds) => @async.with_timeout(milliseconds, body)
   }
-}
-
-///|
-/// Execute one command and capture stdout and stderr.
-///
-/// Standard input is closed by default. Use `Cmd::stdin` to supply text.
-/// Captured stdout and stderr share the `max_output_bytes` limit (8 MiB by
-/// default). When `timeout` expires, the direct child is killed immediately;
-/// descendants require enforcement by the host's native process sandbox.
-#deprecated("Use Cmd::output instead")
-pub async fn Process::run(
-  cmd : Cmd,
-  timeout? : Int,
-  max_output_bytes? : Int = default_max_output_bytes,
-) -> Output {
-  cmd.output(timeout_ms?=timeout, max_output_bytes~)
-}
-
-///|
-/// Execute a pipeline and capture its final stdout and every stage's stderr.
-///
-/// `Pipeline` uses real operating-system pipes. All stages run concurrently
-/// under one structured-concurrency scope. When `timeout` is present, the whole
-/// pipeline is cancelled if it does not finish within that many milliseconds.
-/// The direct child for each stage is killed immediately on cancellation;
-/// descendants require enforcement by the host's native process sandbox.
-#deprecated("Use Pipeline::output instead")
-pub async fn Process::pipeline(
-  pipeline : Pipeline,
-  timeout? : Int,
-  max_output_bytes? : Int = default_max_output_bytes,
-) -> Output {
-  pipeline.output(timeout_ms?=timeout, max_output_bytes~)
 }
 
 ///|
 fn validate_cmd(cmd : Cmd) -> Unit raise ProcessError {
-  if cmd.program_.is_empty() {
+  if cmd.program.is_empty() {
     raise EmptyProgram
   }
-  if cmd.program_.contains("\u{0000}") {
+  if cmd.program.contains("\u{0000}") {
     raise NulByte("program")
   }
-  for index, argument in cmd.arguments_ {
+  for index, argument in cmd.arguments {
     if argument.contains("\u{0000}") {
       raise NulByte("argument[\{index}]")
     }
   }
-  match cmd.cwd_ {
-    Some(directory) if directory.contains("\u{0000}") =>
-      raise NulByte("working directory")
-    _ => ()
+  if cmd.cwd is Some(directory) && directory.contains("\u{0000}") {
+    raise NulByte("working directory")
   }
-  for name, value in cmd.environment_ {
+  for name, value in cmd.env {
     if name.contains("\u{0000}") {
       raise NulByte("environment name")
     }
@@ -162,30 +140,26 @@ async fn[X] spawn_stage(
 ) -> @process.Process {
   @process.spawn(
     group,
-    cmd.program_,
-    cmd.arguments_,
-    extra_env=cmd.environment_,
-    inherit_env=cmd.inherit_environment_,
+    cmd.program,
+    cmd.arguments,
+    extra_env=cmd.env,
+    inherit_env=cmd.inherit_env,
     stdin~,
     stdout~,
     stderr~,
-    cwd?=cmd.cwd_.map(directory => directory[:]),
-    no_console_window=cmd.no_console_window_,
+    cwd?=cmd.cwd.map(directory => directory[:]),
+    no_console_window=cmd.no_console_window,
     cancel_handler=@process.hard_cancel(),
   )
 }
 
 ///|
-async fn write_standard_input(
-  writer : @pipe.PipeWrite,
-  text : String?,
-  bytes : Bytes?,
-) -> Unit {
+async fn write_standard_input(writer : @pipe.PipeWrite, input : Stdin?) -> Unit {
   defer writer.close()
-  match (text, bytes) {
-    (Some(text), _) => writer.write(text)
-    (None, Some(bytes)) => writer.write(bytes)
-    (None, None) => ()
+  match input {
+    Some(Text(text)) => writer.write(text)
+    Some(Binary(bytes)) => writer.write(bytes)
+    None => ()
   }
 }
 
@@ -196,16 +170,16 @@ async fn run_status(cmd : Cmd) -> Int {
   defer stdin_writer.close()
   @async.with_task_group() <| group => {
     group.spawn_bg(allow_failure=true, () => {
-      write_standard_input(stdin_writer, cmd.stdin_text_, cmd.stdin_bytes_)
+      write_standard_input(stdin_writer, cmd.stdin)
     })
     @process.run(
-      cmd.program_,
-      cmd.arguments_,
-      extra_env=cmd.environment_,
-      inherit_env=cmd.inherit_environment_,
+      cmd.program,
+      cmd.arguments,
+      extra_env=cmd.env,
+      inherit_env=cmd.inherit_env,
       stdin=stdin_reader,
-      cwd?=cmd.cwd_.map(directory => directory[:]),
-      no_console_window=cmd.no_console_window_,
+      cwd?=cmd.cwd.map(directory => directory[:]),
+      no_console_window=cmd.no_console_window,
       cancel_handler=@process.hard_cancel(),
     )
   }
@@ -258,7 +232,7 @@ async fn read_bounded(
 
 ///|
 async fn run_pipeline(pipeline : Pipeline, max_output_bytes : Int) -> Output {
-  let commands = pipeline.commands_
+  let commands = pipeline.commands
   let count = commands.length()
   let links : Array[(@pipe.PipeRead, @pipe.PipeWrite)] = []
   defer close_pipes(links)
@@ -293,11 +267,7 @@ async fn run_pipeline(pipeline : Pipeline, max_output_bytes : Int) -> Output {
       )
     }
     group.spawn_bg(allow_failure=true, () => {
-      write_standard_input(
-        first_stdin_writer,
-        commands[0].stdin_text_,
-        commands[0].stdin_bytes_,
-      )
+      write_standard_input(first_stdin_writer, commands[0].stdin)
     })
     let processes : Array[@process.Process] = []
     for index, cmd in commands {
@@ -325,25 +295,22 @@ async fn run_pipeline(pipeline : Pipeline, max_output_bytes : Int) -> Output {
     let stdout_bytes = stdout_task.wait()
     let stage_stderr_bytes : Array[Bytes] = []
     let stage_stderr : Array[String] = []
-    let stderr_bytes = @buffer.Buffer()
     let stderr = StringBuilder()
     for task in stderr_tasks {
       let stage_bytes = task.wait()
       let stage = @utf8.decode_lossy(stage_bytes)
       stage_stderr_bytes.push(stage_bytes)
       stage_stderr.push(stage)
-      stderr_bytes.write_bytes(stage_bytes)
       stderr.write_string(stage)
     }
     {
       exit_code: pipefail_exit_code(exit_codes),
       stage_exit_codes: exit_codes,
-      stdout_bytes,
       stdout: @utf8.decode_lossy(stdout_bytes),
-      stderr_bytes: stderr_bytes.to_bytes(),
+      stdout_bytes,
       stderr: stderr.to_string(),
-      stage_stderr_bytes,
       stage_stderr,
+      stage_stderr_bytes,
     }
   }
 }

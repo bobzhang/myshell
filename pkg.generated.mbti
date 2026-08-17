@@ -19,57 +19,46 @@ pub(all) suberror ProcessError {
   StdinOnNonFirstStage(Int)
   CommandFailed(Output)
 } derive(@debug.Debug)
+pub fn ProcessError::to_repr(Self) -> @debug.Repr
 
 // Types and methods
 type Cmd derive(@debug.Debug)
-#alias(new, deprecated)
-pub fn Cmd::Cmd(String, Array[String]) -> Self
-pub fn Cmd::arg(Self, String) -> Self
-pub fn Cmd::args(Self, ArrayView[String]) -> Self
-pub fn Cmd::arguments(Self) -> Array[String]
-pub fn Cmd::clear_env(Self) -> Self
-pub fn Cmd::cwd(Self, String) -> Self
-pub fn Cmd::env(Self, String, String) -> Self
-pub fn Cmd::environment(Self) -> Map[String, String]
-pub fn Cmd::envs(Self, Map[String, String]) -> Self
-pub fn Cmd::inherits_environment(Self) -> Bool
-pub fn Cmd::no_console_window(Self) -> Self
+pub fn Cmd::Cmd(String, Array[String], cwd? : String, env? : Map[String, String], inherit_env? : Bool, stdin? : Stdin, no_console_window? : Bool) -> Self
+pub fn Cmd::arguments(Self) -> ArrayView[String]
+pub fn Cmd::cwd(Self) -> String?
+pub fn Cmd::env(Self) -> Map[String, String]
+pub fn Cmd::inherit_env(Self) -> Bool
+pub fn Cmd::no_console_window(Self) -> Bool
 pub async fn Cmd::output(Self, timeout_ms? : Int, max_output_bytes? : Int) -> Output
-pub fn Cmd::pipe(Self, Self) -> Pipeline
 pub fn Cmd::program(Self) -> String
-pub fn Cmd::standard_input(Self) -> String?
-pub fn Cmd::standard_input_bytes(Self) -> Bytes?
 pub async fn Cmd::status(Self, timeout_ms? : Int) -> Int
-pub fn Cmd::stdin(Self, String) -> Self
-pub fn Cmd::stdin_bytes(Self, Bytes) -> Self
-pub fn Cmd::working_directory(Self) -> String?
+pub fn Cmd::stdin(Self) -> Stdin?
+pub fn Cmd::to_repr(Self) -> @debug.Repr
 
 pub struct Output {
   exit_code : Int
   stage_exit_codes : Array[Int]
-  stdout_bytes : Bytes
   stdout : String
-  stderr_bytes : Bytes
+  stdout_bytes : Bytes
   stderr : String
-  stage_stderr_bytes : Array[Bytes]
   stage_stderr : Array[String]
+  stage_stderr_bytes : Array[Bytes]
 } derive(@debug.Debug)
 pub fn Output::check(Self) -> Self raise ProcessError
 pub fn Output::success(Self) -> Bool
+pub fn Output::to_repr(Self) -> @debug.Repr
 
 type Pipeline derive(@debug.Debug)
-#alias(new, deprecated)
 pub fn Pipeline::Pipeline(Array[Cmd]) -> Self
-pub fn Pipeline::commands(Self) -> Array[Cmd]
+pub fn Pipeline::commands(Self) -> ArrayView[Cmd]
 pub async fn Pipeline::output(Self, timeout_ms? : Int, max_output_bytes? : Int) -> Output
-pub fn Pipeline::pipe(Self, Cmd) -> Self
+pub fn Pipeline::to_repr(Self) -> @debug.Repr
 
-pub enum Process {
-}
-#deprecated
-pub async fn Process::pipeline(Pipeline, timeout? : Int, max_output_bytes? : Int) -> Output
-#deprecated
-pub async fn Process::run(Cmd, timeout? : Int, max_output_bytes? : Int) -> Output
+pub(all) enum Stdin {
+  Text(String)
+  Binary(Bytes)
+} derive(@debug.Debug)
+pub fn Stdin::to_repr(Self) -> @debug.Repr
 
 // Type aliases
 

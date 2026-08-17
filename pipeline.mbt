@@ -1,35 +1,38 @@
 ///|
 /// A sequence of commands connected by operating-system pipes.
 ///
-/// An empty pipeline is rejected when execution is requested.
+/// Every stage is separately visible to the process host, and an empty
+/// pipeline is rejected when execution is requested.
 struct Pipeline {
-  commands_ : Array[Cmd]
+  commands : Array[Cmd]
 } derive(Debug)
 
 ///|
-/// Create a pipeline from `commands`.
+/// Describe a pipeline whose stages are connected by real pipes.
 ///
-/// An empty pipeline is rejected when it is executed.
-#alias(new, deprecated="Use Pipeline::Pipeline instead")
+/// Only the first stage may carry `stdin`; the rest read from the previous
+/// stage. `commands` is copied, so later changes to the caller's array do not
+/// reach the pipeline.
+///
+/// # Example
+/// ```mbt check
+/// test {
+///   let plan = @myshell.Pipeline([
+///     Cmd("printf", ["alpha\nbeta\n"]),
+///     Cmd("grep", ["beta"]),
+///   ])
+///   inspect(plan.commands().length(), content="2")
+/// }
+/// ```
 pub fn Pipeline::Pipeline(commands : Array[Cmd]) -> Pipeline {
-  { commands_: commands.copy() }
+  { commands: commands.copy() }
 }
 
 ///|
-/// Return a copy with `command` appended as the next stage.
-pub fn Pipeline::pipe(self : Pipeline, command : Cmd) -> Pipeline {
-  let commands = self.commands_.copy()
-  commands.push(command)
-  { commands_: commands }
+/// The stages in execution order, as a read-only view.
+pub fn Pipeline::commands(self : Pipeline) -> ArrayView[Cmd] {
+  self.commands[:]
 }
 
 ///|
-/// Return the commands in execution order.
-pub fn Pipeline::commands(self : Pipeline) -> Array[Cmd] {
-  self.commands_.copy()
-}
-
-///|
-fn Pipeline::snapshot(self : Pipeline) -> Pipeline {
-  { commands_: [ for command in self.commands_ => command.snapshot() ] }
-}
+pub extend Pipeline with @debug.Debug::{to_repr}

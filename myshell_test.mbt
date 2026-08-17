@@ -1,43 +1,72 @@
 ///|
-test "command builders are immutable and literal" {
-  let base = @myshell.Cmd::Cmd("git", ["status"])
-  let configured = base
-    .arg("--short")
-    .cwd("workspace")
-    .env("LC_ALL", "C")
-    .clear_env()
-    .stdin("input")
-  inspect(base.program(), content="git")
-  debug_inspect(base.arguments(), content="[\"status\"]")
-  debug_inspect(configured.arguments(), content="[\"status\", \"--short\"]")
-  debug_inspect(configured.working_directory(), content="Some(\"workspace\")")
-  inspect(configured.environment()["LC_ALL"], content="C")
-  inspect(configured.inherits_environment(), content="false")
-  debug_inspect(configured.standard_input(), content="Some(\"input\")")
-  let binary = base.stdin_bytes(b"\x00\xff")
-  debug_inspect(binary.standard_input(), content="None")
-  guard binary.standard_input_bytes() is Some(input) else {
-    fail("expected binary standard input")
-  }
-  assert_eq(input, b"\x00\xff")
-  let batch = base.envs({ "FIRST": "1", "SECOND": "2" })
-  inspect(batch.environment()["FIRST"], content="1")
-  inspect(batch.environment()["SECOND"], content="2")
+test "a command is a plain, inspectable description" {
+  let cmd = @myshell.Cmd("git", ["status", "--short"], cwd="workspace", env={
+    "NO_COLOR": "1",
+  })
+  inspect(cmd.program(), content="git")
+  assert_eq(cmd.arguments(), ["status", "--short"])
+  debug_inspect(cmd.cwd(), content="Some(\"workspace\")")
+  inspect(cmd.env()["NO_COLOR"], content="1")
+  inspect(cmd.inherit_env(), content="true")
+  debug_inspect(cmd.stdin(), content="None")
+  inspect(cmd.no_console_window(), content="false")
 }
 
 ///|
-test "pipeline builders are immutable" {
-  let first = @myshell.Cmd::Cmd("printf", ["hello"])
-  let pipeline = first.pipe(Cmd("cat", []))
-  let longer = pipeline.pipe(Cmd("wc", ["-c"]))
-  inspect(pipeline.commands().length(), content="2")
-  inspect(longer.commands().length(), content="3")
+test "defaults keep a command closed and inherited" {
+  let cmd = @myshell.Cmd("true", [])
+  debug_inspect(
+    cmd,
+    content=(
+      #|{
+      #|  program: "true",
+      #|  arguments: [],
+      #|  cwd: None,
+      #|  env: {},
+      #|  inherit_env: true,
+      #|  stdin: None,
+      #|  no_console_window: false,
+      #|}
+    ),
+  )
+}
+
+///|
+test "a command does not alias the collections it was given" {
+  let arguments = ["status"]
+  let env = { "NO_COLOR": "1" }
+  let cmd = @myshell.Cmd("git", arguments, env~)
+  arguments.push("--short")
+  env["NO_COLOR"] = "0"
+  assert_eq(cmd.arguments(), ["status"])
+  inspect(cmd.env()["NO_COLOR"], content="1")
+}
+
+///|
+test "reading a command back does not expose it to mutation" {
+  let cmd = @myshell.Cmd("git", ["status"], env={ "NO_COLOR": "1" })
+  let borrowed = cmd.env()
+  borrowed["NO_COLOR"] = "0"
+  borrowed["INJECTED"] = "yes"
+  inspect(cmd.env()["NO_COLOR"], content="1")
+  debug_inspect(cmd.env().get("INJECTED"), content="None")
+}
+
+///|
+test "stdin is text or binary, never both" {
+  let text = @myshell.Cmd("cat", [], stdin=Text("hello"))
+  let binary = @myshell.Cmd("cat", [], stdin=Binary(b"\x00\xff"))
+  debug_inspect(text.stdin(), content="Some(Text(\"hello\"))")
+  guard binary.stdin() is Some(Binary(input)) else {
+    fail("expected binary standard input")
+  }
+  assert_eq(input, b"\x00\xff")
 }
 
 ///|
 #cfg(not(platform="windows"))
 async test "run captures stdout and passes shell characters literally" {
-  let output = @myshell.Cmd::Cmd("printf", ["%s", "$(echo not-executed) | *"]).output()
+  let output = @myshell.Cmd("printf", ["%s", "$(echo not-executed) | *"]).output()
   inspect(output.success(), content="true")
   inspect(output.exit_code, content="0")
   debug_inspect(output.stage_exit_codes, content="[0]")
@@ -48,7 +77,7 @@ async test "run captures stdout and passes shell characters literally" {
 ///|
 #cfg(not(platform="windows"))
 async test "run captures binary output without cancelling the command" {
-  let output = @myshell.Cmd::Cmd("printf", ["\\377"]).output()
+  let output = @myshell.Cmd("printf", ["\\377"]).output()
   inspect(output.success(), content="true")
   assert_eq(output.stdout_bytes, b"\xff")
   inspect(output.stdout, content="�")
@@ -57,35 +86,37 @@ async test "run captures binary output without cancelling the command" {
 ///|
 #cfg(not(platform="windows"))
 async test "run supplies stdin, cwd, and environment" {
-  let stdin_output = @myshell.Cmd::Cmd("cat", []).stdin("from stdin").output()
+  let stdin_output = @myshell.Cmd("cat", [], stdin=Text("from stdin")).output()
   inspect(stdin_output.stdout, content="from stdin")
-  let env_output = @myshell.Cmd::Cmd("printenv", ["MYSHELL_TEST_VALUE"])
-    .env("MYSHELL_TEST_VALUE", "works")
-    .output()
+  let env_output = @myshell.Cmd("printenv", ["MYSHELL_TEST_VALUE"], env={
+    "MYSHELL_TEST_VALUE": "works",
+  }).output()
   inspect(env_output.stdout.trim(), content="works")
-  let cwd_output = @myshell.Cmd::Cmd("pwd", []).cwd(".").output()
+  let cwd_output = @myshell.Cmd("pwd", [], cwd=".").output()
   inspect(cwd_output.stdout.trim().has_suffix("/myshell"), content="true")
-  let clean_output = @myshell.Cmd::Cmd("/usr/bin/env", [])
-    .clear_env()
-    .env("MYSHELL_ONLY", "yes")
-    .output()
+  let clean_output = @myshell.Cmd(
+    "/usr/bin/env",
+    [],
+    env={ "MYSHELL_ONLY": "yes" },
+    inherit_env=false,
+  ).output()
   inspect(clean_output.stdout, content="MYSHELL_ONLY=yes\n")
 }
 
 ///|
 #cfg(not(platform="windows"))
 async test "run supplies binary stdin" {
-  let output = @myshell.Cmd::Cmd("cat", []).stdin_bytes(b"\x00\xff").output()
+  let output = @myshell.Cmd("cat", [], stdin=Binary(b"\x00\xff")).output()
   assert_eq(output.stdout_bytes, b"\x00\xff")
 }
 
 ///|
 #cfg(not(platform="windows"))
 async test "status returns the exit code without capture" {
-  inspect(@myshell.Cmd::Cmd("true", []).status(), content="0")
-  inspect(@myshell.Cmd::Cmd("false", []).status(), content="1")
+  inspect(@myshell.Cmd("true", []).status(), content="0")
+  inspect(@myshell.Cmd("false", []).status(), content="1")
   inspect(
-    @myshell.Cmd::Cmd("true", []).no_console_window().status(),
+    @myshell.Cmd("true", [], no_console_window=true).status(),
     content="0",
   )
 }
@@ -93,12 +124,11 @@ async test "status returns the exit code without capture" {
 ///|
 #cfg(not(platform="windows"))
 async test "pipeline uses real pipes and captures each status" {
-  let pipeline = @myshell.Pipeline::Pipeline([
+  let output = @myshell.Pipeline([
     Cmd("printf", ["alpha\nbeta\ngamma\n"]),
     Cmd("grep", ["beta"]),
     Cmd("tr", ["a-z", "A-Z"]),
-  ])
-  let output = pipeline.output()
+  ]).output()
   inspect(output.success(), content="true")
   inspect(output.stdout, content="BETA\n")
   debug_inspect(output.stage_exit_codes, content="[0, 0, 0]")
@@ -108,7 +138,7 @@ async test "pipeline uses real pipes and captures each status" {
 ///|
 #cfg(not(platform="windows"))
 async test "pipeline reports pipefail status" {
-  let output = @myshell.Pipeline::Pipeline([Cmd("false", []), Cmd("cat", [])]).output()
+  let output = @myshell.Pipeline([Cmd("false", []), Cmd("cat", [])]).output()
   inspect(output.success(), content="false")
   inspect(output.exit_code, content="1")
   debug_inspect(output.stage_exit_codes, content="[1, 0]")
@@ -123,7 +153,7 @@ async test "pipeline reports pipefail status" {
 ///|
 #cfg(not(platform="windows"))
 async test "pipeline preserves stderr by stage" {
-  let output = @myshell.Pipeline::Pipeline([
+  let output = @myshell.Pipeline([
     Cmd("/usr/bin/awk", [
       "BEGIN { printf \"first\" > \"/dev/stderr\"; print \"hello\" }",
     ]),
@@ -133,27 +163,36 @@ async test "pipeline preserves stderr by stage" {
   ]).output()
   inspect(output.stdout, content="hello\n")
   debug_inspect(output.stage_stderr, content="[\"first\", \"second\"]")
+  debug_inspect(
+    output.stage_stderr_bytes,
+    content=(
+      #|[
+      #|  <Bytes: [0x66, 0x69, 0x72, 0x73, 0x74]>,
+      #|  <Bytes: [0x73, 0x65, 0x63, 0x6f, 0x6e, 0x64]>,
+      #|]
+    ),
+  )
   inspect(output.stderr, content="firstsecond")
 }
 
 ///|
 async test "invalid plans fail before spawning" {
-  try @myshell.Cmd::Cmd("", []).output() catch {
+  try @myshell.Cmd("", []).output() catch {
     @myshell.ProcessError::EmptyProgram => ()
     _ => fail("unexpected error")
   } noraise {
     _ => fail("expected EmptyProgram")
   }
-  try @myshell.Pipeline::Pipeline([]).output() catch {
+  try @myshell.Pipeline([]).output() catch {
     @myshell.ProcessError::EmptyPipeline => ()
     _ => fail("unexpected error")
   } noraise {
     _ => fail("expected EmptyPipeline")
   }
   try
-    @myshell.Pipeline::Pipeline([
+    @myshell.Pipeline([
       Cmd("first", []),
-      @myshell.Cmd::Cmd("second", []).stdin("not allowed"),
+      Cmd("second", [], stdin=Text("not allowed")),
     ]).output()
   catch {
     @myshell.ProcessError::StdinOnNonFirstStage(index) =>
@@ -162,28 +201,28 @@ async test "invalid plans fail before spawning" {
   } noraise {
     _ => fail("expected StdinOnNonFirstStage")
   }
-  try @myshell.Cmd::Cmd("printf", ["allowed\u{0000}truncated"]).output() catch {
+  try @myshell.Cmd("printf", ["allowed\u{0000}truncated"]).output() catch {
     @myshell.ProcessError::NulByte(location) =>
       inspect(location, content="argument[0]")
     _ => fail("unexpected error")
   } noraise {
     _ => fail("expected NulByte")
   }
-  try @myshell.Cmd::Cmd("printf", []).env("BAD=NAME", "value").output() catch {
+  try @myshell.Cmd("printf", [], env={ "BAD=NAME": "value" }).output() catch {
     @myshell.ProcessError::InvalidEnvironmentName(name) =>
       inspect(name, content="BAD=NAME")
     _ => fail("unexpected error")
   } noraise {
     _ => fail("expected InvalidEnvironmentName")
   }
-  try @myshell.Cmd::Cmd("printf", []).env("", "value").output() catch {
+  try @myshell.Cmd("printf", [], env={ "": "value" }).output() catch {
     @myshell.ProcessError::InvalidEnvironmentName(name) =>
       inspect(name, content="")
     _ => fail("unexpected error")
   } noraise {
     _ => fail("expected InvalidEnvironmentName")
   }
-  try @myshell.Cmd::Cmd("printf", []).output(max_output_bytes=0) catch {
+  try @myshell.Cmd("printf", []).output(max_output_bytes=0) catch {
     @myshell.ProcessError::InvalidOutputLimit(limit) =>
       inspect(limit, content="0")
     _ => fail("unexpected error")
@@ -195,9 +234,9 @@ async test "invalid plans fail before spawning" {
 ///|
 #cfg(not(platform="windows"))
 async test "early stdin close still returns process output" {
-  let output = @myshell.Cmd::Cmd("true", [])
-    .stdin("x".repeat(1024 * 1024))
-    .output(timeout_ms=1000)
+  let output = @myshell.Cmd("true", [], stdin=Text("x".repeat(1024 * 1024))).output(
+    timeout_ms=1000,
+  )
   inspect(output.success(), content="true")
 }
 
@@ -205,7 +244,7 @@ async test "early stdin close still returns process output" {
 #cfg(not(platform="windows"))
 async test "output capture is bounded across stdout and stderr" {
   try
-    @myshell.Cmd::Cmd("/usr/bin/awk", [
+    @myshell.Cmd("/usr/bin/awk", [
       "BEGIN { printf \"12\"; printf \"345\" > \"/dev/stderr\" }",
     ]).output(max_output_bytes=4)
   catch {
@@ -222,14 +261,14 @@ async test "output capture is bounded across stdout and stderr" {
 ///|
 #cfg(not(platform="windows"))
 async test "timeout cancels the child" {
-  try @myshell.Cmd::Cmd("sleep", ["1"]).output(timeout_ms=20) catch {
+  try @myshell.Cmd("sleep", ["1"]).output(timeout_ms=20) catch {
     @async.TimeoutError => ()
     _ => fail("unexpected error")
   } noraise {
     _ => fail("expected TimeoutError")
   }
   try
-    @myshell.Pipeline::Pipeline([Cmd("sleep", ["1"]), Cmd("cat", [])]).output(
+    @myshell.Pipeline([Cmd("sleep", ["1"]), Cmd("cat", [])]).output(
       timeout_ms=20,
     )
   catch {
