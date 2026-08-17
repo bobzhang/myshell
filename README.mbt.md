@@ -402,6 +402,30 @@ async fn main {
 }'
 ```
 
+## Known limitation: captured output can truncate
+
+Captured output can be cut short, silently, when a child writes faster than
+this library drains the pipe. `moonbitlang/async` creates its pipes with
+`O_NONBLOCK`, and that flag survives into the child, so once the pipe fills the
+child's own `write` fails with `EAGAIN` rather than blocking. Most programs
+report a write error and exit non-zero at that point, so `Output` holds a
+prefix of what the command meant to say.
+
+This is [moonbitlang/async#553](https://github.com/moonbitlang/async/issues/553)
+and cannot be fixed from here; the fix is to clear `O_NONBLOCK` on the
+descriptors handed to a child.
+
+It is a race, not a fixed ceiling. Small outputs are unaffected in practice.
+Larger ones usually survive on the `native` target and usually do not on
+`wasm`, but a loaded machine or a slower consumer can lose either. Until it is
+fixed upstream:
+
+- `status` is unaffected, because nothing is captured.
+- `Redirect::ToFile` and `AppendToFile` are unaffected, because a regular file
+  is never made non-blocking.
+- `output` and `each_line` are affected whenever a command produces more than a
+  pipe buffer, roughly 64 KiB.
+
 ## Security boundary
 
 This package removes shell parsing and keeps each process invocation structured;
