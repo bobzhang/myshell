@@ -1,0 +1,75 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "bobzhang/myshell"
+
+import {
+  "moonbitlang/core/debug",
+}
+
+// Values
+
+// Errors
+pub(all) suberror ProcessError {
+  EmptyProgram
+  EmptyPipeline
+  InvalidOutputLimit(Int)
+  OutputLimitExceeded(stream~ : String, limit~ : Int)
+  NulByte(String)
+  StdinOnNonFirstStage(Int)
+  CommandFailed(Output)
+} derive(@debug.Debug)
+
+// Types and methods
+pub struct Cmd {
+  program_ : String
+  arguments_ : Array[String]
+  cwd_ : String?
+  environment_ : Map[String, String]
+  inherit_environment_ : Bool
+  stdin_ : String?
+  no_console_window_ : Bool
+} derive(@debug.Debug)
+pub fn Cmd::arg(Self, String) -> Self
+pub fn Cmd::args(Self, ArrayView[String]) -> Self
+pub fn Cmd::arguments(Self) -> Array[String]
+pub fn Cmd::clear_env(Self) -> Self
+pub fn Cmd::cwd(Self, String) -> Self
+pub fn Cmd::env(Self, String, String) -> Self
+pub fn Cmd::environment(Self) -> Map[String, String]
+pub fn Cmd::envs(Self, Map[String, String]) -> Self
+pub fn Cmd::inherits_environment(Self) -> Bool
+pub fn Cmd::new(String, Array[String]) -> Self
+pub fn Cmd::no_console_window(Self) -> Self
+pub fn Cmd::pipe(Self, Self) -> Pipeline
+pub fn Cmd::program(Self) -> String
+pub fn Cmd::standard_input(Self) -> String?
+pub fn Cmd::stdin(Self, String) -> Self
+pub fn Cmd::working_directory(Self) -> String?
+
+pub(all) struct Output {
+  exit_code : Int
+  stage_exit_codes : Array[Int]
+  stdout_bytes : Bytes
+  stdout : String
+  stderr_bytes : Bytes
+  stderr : String
+  stage_stderr_bytes : Array[Bytes]
+  stage_stderr : Array[String]
+} derive(@debug.Debug)
+pub fn Output::check(Self) -> Self raise ProcessError
+pub fn Output::success(Self) -> Bool
+
+pub struct Pipeline {
+  commands_ : Array[Cmd]
+} derive(@debug.Debug)
+pub fn Pipeline::commands(Self) -> Array[Cmd]
+pub fn Pipeline::new(Array[Cmd]) -> Self
+pub fn Pipeline::pipe(Self, Cmd) -> Self
+
+pub enum Process {
+}
+pub async fn Process::pipeline(Pipeline, timeout? : Int, max_output_bytes? : Int) -> Output
+pub async fn Process::run(Cmd, timeout? : Int, max_output_bytes? : Int) -> Output
+
+// Type aliases
+
+// Traits
