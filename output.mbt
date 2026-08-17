@@ -57,6 +57,7 @@ pub(all) suberror ProcessError {
   EmptyPipeline
   InvalidEnvironmentName(String)
   InvalidOutputLimit(Int)
+  InvalidGracePeriod(Int)
   OutputLimitExceeded(stream~ : String, limit~ : Int)
   NulByte(String)
   StdinOnNonFirstStage(Int)

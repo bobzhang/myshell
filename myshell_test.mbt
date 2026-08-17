@@ -27,6 +27,7 @@ test "defaults keep a command closed and inherited" {
       #|  stdin: None,
       #|  stdout: Capture,
       #|  stderr: Capture,
+      #|  cancel: Kill,
       #|  no_console_window: false,
       #|}
     ),
@@ -491,4 +492,83 @@ async test "a CRLF terminator does not consume the line allowance" {
   } noraise {
     _ => fail("expected OutputLimitExceeded")
   }
+}
+
+///|
+test "cancellation defaults to killing the child" {
+  debug_inspect(@myshell.Cmd("true", []).cancel(), content="Kill")
+  debug_inspect(
+    @myshell.Cmd("true", [], cancel=Graceful(grace_ms=500)).cancel(),
+    content="Graceful(grace_ms=500)",
+  )
+}
+
+///|
+async test "a negative grace period is rejected before spawning" {
+  try @myshell.Cmd("true", [], cancel=Graceful(grace_ms=-1)).status() catch {
+    @myshell.ProcessError::InvalidGracePeriod(grace_ms) =>
+      inspect(grace_ms, content="-1")
+    _ => fail("unexpected error")
+  } noraise {
+    _ => fail("expected InvalidGracePeriod")
+  }
+}
+
+///|
+#cfg(not(platform="windows"))
+async test "a graceful timeout still terminates the child" {
+  try
+    @myshell.Cmd("sleep", ["5"], cancel=Graceful(grace_ms=200)).output(
+      timeout_ms=20,
+    )
+    |> ignore
+  catch {
+    @async.TimeoutError => ()
+    _ => fail("unexpected error")
+  } noraise {
+    _ => fail("expected TimeoutError")
+  }
+}
+
+///|
+#cfg(not(platform="windows"))
+async test "Graceful asks the child to stop, Kill does not" {
+  // `/bin/sh` is named explicitly as the program to run; nothing is being
+  // shell-interpreted on myshell's behalf. It is the simplest way to get a
+  // child that reacts to SIGTERM observably.
+  let marker = "/tmp/myshell-graceful-marker"
+  // `wait` is interruptible by a trap, whereas a foreground `sleep` would make
+  // the shell defer the handler until it finished.
+  let handler =
+    #|trap 'printf stopped > /tmp/myshell-graceful-marker; exit 0' TERM
+    #|sleep 5 &
+    #|wait
+  //
+  // A graceful cancellation delivers SIGTERM, so the handler runs.
+  @myshell.Cmd("rm", ["-f", marker]).status() |> ignore
+  try
+    @myshell.Cmd("/bin/sh", ["-c", handler], cancel=Graceful(grace_ms=500)).output(
+      timeout_ms=50,
+    )
+    |> ignore
+  catch {
+    @async.TimeoutError => ()
+    _ => fail("unexpected error")
+  } noraise {
+    _ => fail("expected TimeoutError")
+  }
+  inspect(@myshell.Cmd("cat", [marker]).output().stdout, content="stopped")
+  //
+  // The default kills outright, so the handler never gets to run.
+  @myshell.Cmd("rm", ["-f", marker]).status() |> ignore
+  try
+    @myshell.Cmd("/bin/sh", ["-c", handler]).output(timeout_ms=50) |> ignore
+  catch {
+    @async.TimeoutError => ()
+    _ => fail("unexpected error")
+  } noraise {
+    _ => fail("expected TimeoutError")
+  }
+  inspect(@myshell.Cmd("cat", [marker]).output().success(), content="false")
+  @myshell.Cmd("rm", ["-f", marker]).status() |> ignore
 }

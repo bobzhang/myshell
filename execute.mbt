@@ -211,6 +211,9 @@ fn validate_cmd(cmd : Cmd) -> Unit raise ProcessError {
   }
   validate_redirect(cmd.stdout, "standard output path")
   validate_redirect(cmd.stderr, "standard error path")
+  if cmd.cancel is Graceful(grace_ms~) && grace_ms < 0 {
+    raise InvalidGracePeriod(grace_ms)
+  }
   for name, value in cmd.env {
     if name.contains("\u{0000}") {
       raise NulByte("environment name")
@@ -288,7 +291,10 @@ async fn[X] spawn_stage(
     stderr?,
     cwd?=cmd.cwd.map(directory => directory[:]),
     no_console_window=cmd.no_console_window,
-    cancel_handler=@process.hard_cancel(),
+    cancel_handler=match cmd.cancel {
+      Kill => @process.hard_cancel()
+      Graceful(grace_ms~) => @process.graceful_cancel(timeout=grace_ms)
+    },
   )
 }
 
