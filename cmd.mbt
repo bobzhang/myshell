@@ -1,11 +1,33 @@
 ///|
-/// Data written to a child process's standard input.
+/// Where a child process's standard input comes from.
 ///
 /// `Text` is encoded as UTF-8. `Binary` is written verbatim, which is what a
 /// child expecting a compressed or otherwise non-textual stream needs.
+/// `FromFile` is the structured form of a shell's `< path`; the file must
+/// already exist.
 pub(all) enum Stdin {
   Text(String)
   Binary(Bytes)
+  FromFile(String)
+} derive(Debug)
+
+///|
+/// Where a child process's standard output or standard error goes.
+///
+/// `Capture` returns the stream to the caller: `output` collects it into
+/// `Output`, `each_line` delivers stdout line by line, and `status` has no
+/// return channel so it inherits instead. `Inherit` hands the stream to the
+/// parent's own descriptor.
+///
+/// `ToFile` and `AppendToFile` are the structured forms of a shell's `> path`
+/// and `>> path`. Both create the file if it is missing; `ToFile` truncates an
+/// existing one. A redirected stream is absent from `Output`, where it appears
+/// as an empty string.
+pub(all) enum Redirect {
+  Capture
+  Inherit
+  ToFile(String)
+  AppendToFile(String)
 } derive(Debug)
 
 ///|
@@ -24,6 +46,8 @@ struct Cmd {
   env : Map[String, String]
   inherit_env : Bool
   stdin : Stdin?
+  stdout : Redirect
+  stderr : Redirect
   no_console_window : Bool
 } derive(Debug)
 
@@ -35,6 +59,8 @@ struct Cmd {
 /// environment; pass `inherit_env=false` to start from an empty one.
 /// `no_console_window` suppresses a console window on Windows and is ignored
 /// elsewhere.
+///
+/// `stdout` and `stderr` default to `Capture`, so `output` collects them.
 ///
 /// `arguments` and `env` are copied, so later changes to the caller's
 /// collections do not reach the command.
@@ -54,6 +80,8 @@ pub fn Cmd::Cmd(
   env? : Map[String, String] = {},
   inherit_env? : Bool = true,
   stdin? : Stdin,
+  stdout? : Redirect = Capture,
+  stderr? : Redirect = Capture,
   no_console_window? : Bool = false,
 ) -> Cmd {
   {
@@ -63,6 +91,8 @@ pub fn Cmd::Cmd(
     env: env.copy(),
     inherit_env,
     stdin,
+    stdout,
+    stderr,
     no_console_window,
   }
 }
@@ -104,6 +134,18 @@ pub fn Cmd::stdin(self : Cmd) -> Stdin? {
 }
 
 ///|
+/// Where standard output goes.
+pub fn Cmd::stdout(self : Cmd) -> Redirect {
+  self.stdout
+}
+
+///|
+/// Where standard error goes.
+pub fn Cmd::stderr(self : Cmd) -> Redirect {
+  self.stderr
+}
+
+///|
 /// Whether creation of a console window is suppressed on Windows.
 pub fn Cmd::no_console_window(self : Cmd) -> Bool {
   self.no_console_window
@@ -114,3 +156,6 @@ pub extend Cmd with @debug.Debug::{to_repr}
 
 ///|
 pub extend Stdin with @debug.Debug::{to_repr}
+
+///|
+pub extend Redirect with @debug.Debug::{to_repr}

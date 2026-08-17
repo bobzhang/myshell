@@ -60,6 +60,8 @@ pub(all) suberror ProcessError {
   OutputLimitExceeded(stream~ : String, limit~ : Int)
   NulByte(String)
   StdinOnNonFirstStage(Int)
+  RedirectOnNonFinalStage(Int)
+  StdoutNotCaptured
   CommandFailed(Output)
 } derive(Debug)
 
