@@ -20,6 +20,9 @@ test "command builders are immutable and literal" {
     fail("expected binary standard input")
   }
   assert_eq(input, b"\x00\xff")
+  let batch = base.envs({ "FIRST": "1", "SECOND": "2" })
+  inspect(batch.environment()["FIRST"], content="1")
+  inspect(batch.environment()["SECOND"], content="2")
 }
 
 ///|
@@ -62,6 +65,11 @@ async test "run supplies stdin, cwd, and environment" {
   inspect(env_output.stdout.trim(), content="works")
   let cwd_output = @myshell.Cmd::Cmd("pwd", []).cwd(".").output()
   inspect(cwd_output.stdout.trim().has_suffix("/myshell"), content="true")
+  let clean_output = @myshell.Cmd::Cmd("/usr/bin/env", [])
+    .clear_env()
+    .env("MYSHELL_ONLY", "yes")
+    .output()
+  inspect(clean_output.stdout, content="MYSHELL_ONLY=yes\n")
 }
 
 ///|
@@ -76,6 +84,10 @@ async test "run supplies binary stdin" {
 async test "status returns the exit code without capture" {
   inspect(@myshell.Cmd::Cmd("true", []).status(), content="0")
   inspect(@myshell.Cmd::Cmd("false", []).status(), content="1")
+  inspect(
+    @myshell.Cmd::Cmd("true", []).no_console_window().status(),
+    content="0",
+  )
 }
 
 ///|
@@ -106,6 +118,22 @@ async test "pipeline reports pipefail status" {
   } noraise {
     _ => fail("expected CommandFailed")
   }
+}
+
+///|
+#cfg(not(platform="windows"))
+async test "pipeline preserves stderr by stage" {
+  let output = @myshell.Pipeline::Pipeline([
+    Cmd("/usr/bin/awk", [
+      "BEGIN { printf \"first\" > \"/dev/stderr\"; print \"hello\" }",
+    ]),
+    Cmd("/usr/bin/awk", [
+      "{ print } END { printf \"second\" > \"/dev/stderr\" }",
+    ]),
+  ]).output()
+  inspect(output.stdout, content="hello\n")
+  debug_inspect(output.stage_stderr, content="[\"first\", \"second\"]")
+  inspect(output.stderr, content="firstsecond")
 }
 
 ///|
@@ -176,9 +204,13 @@ async test "early stdin close still returns process output" {
 ///|
 #cfg(not(platform="windows"))
 async test "output capture is bounded across stdout and stderr" {
-  try @myshell.Cmd::Cmd("printf", ["12345"]).output(max_output_bytes=4) catch {
+  try
+    @myshell.Cmd::Cmd("/usr/bin/awk", [
+      "BEGIN { printf \"12\"; printf \"345\" > \"/dev/stderr\" }",
+    ]).output(max_output_bytes=4)
+  catch {
     @myshell.ProcessError::OutputLimitExceeded(stream~, limit~) => {
-      inspect(stream, content="stdout")
+      assert_true(stream == "stdout" || stream == "stderr")
       inspect(limit, content="4")
     }
     _ => fail("unexpected error")
@@ -191,6 +223,16 @@ async test "output capture is bounded across stdout and stderr" {
 #cfg(not(platform="windows"))
 async test "timeout cancels the child" {
   try @myshell.Cmd::Cmd("sleep", ["1"]).output(timeout_ms=20) catch {
+    @async.TimeoutError => ()
+    _ => fail("unexpected error")
+  } noraise {
+    _ => fail("expected TimeoutError")
+  }
+  try
+    @myshell.Pipeline::Pipeline([Cmd("sleep", ["1"]), Cmd("cat", [])]).output(
+      timeout_ms=20,
+    )
+  catch {
     @async.TimeoutError => ()
     _ => fail("unexpected error")
   } noraise {
