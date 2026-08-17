@@ -56,19 +56,40 @@ Cmd(
   env? : Map[String, String], // default: {}
   inherit_env? : Bool,     // default: true
   stdin? : Stdin,          // default: closed
+  stdout? : Redirect,      // default: Capture
+  stderr? : Redirect,      // default: Capture
   no_console_window? : Bool, // default: false, Windows only
 ) -> Cmd
 
 Pipeline(commands : Array[Cmd]) -> Pipeline
 ```
 
-Execution: `Cmd::output`, `Cmd::status`, `Pipeline::output`.
+```moonbit nocheck
+///|
+enum Stdin {
+  Text(String)
+  Binary(Bytes)
+  FromFile(String)
+} // `< path`
+
+///|
+enum Redirect {
+  Capture
+  Inherit
+  ToFile(String)
+  AppendToFile(String)
+} // `> path`, `>> path`
+```
+
+Execution: `output` collects the streams, `status` returns only the exit code,
+and `each_line` follows standard output as it is produced. Each exists on both
+`Cmd` and `Pipeline`, except `Cmd::status`.
 
 `Cmd` and `Pipeline` are abstract and immutable. They are read back through
 `program()`, `arguments()`, `cwd()`, `env()`, `inherit_env()`, `stdin()`,
-`no_console_window()`, and `commands()` — so a plan that has been inspected is
-the same plan that runs. `Output` and `Stdin` are transparent, because a result
-is data and an input mode is a choice.
+`stdout()`, `stderr()`, `no_console_window()`, and `commands()` — so a plan that
+has been inspected is the same plan that runs. `Output`, `Stdin`, and `Redirect`
+are transparent, because a result is data and a stream setting is a choice.
 
 ## 1. Run one command
 
@@ -193,7 +214,54 @@ async test {
 }
 ```
 
-## 7. Run without capturing output
+## 7. Redirect to and from files
+
+`ToFile` and `AppendToFile` replace a shell's `> path` and `>> path`, and
+`FromFile` replaces `< path`. Without them the only shell-free option would be
+to capture in memory and write the file yourself.
+
+```mbt check
+///|
+#cfg(not(platform="windows"))
+async test {
+  let path = "/tmp/myshell-readme.log"
+  @myshell.Cmd("printf", ["one\n"], stdout=ToFile(path)).status() |> ignore
+  @myshell.Cmd("printf", ["two\n"], stdout=AppendToFile(path)).status()
+  |> ignore
+  let back = @myshell.Cmd("cat", [], stdin=FromFile(path)).output()
+  assert_eq(back.stdout, "one\ntwo\n")
+  @myshell.Cmd("rm", ["-f", path]).status() |> ignore
+}
+```
+
+A redirected stream is not captured, so it arrives empty in `Output` and does
+not count against `max_output_bytes`. Use `Inherit` to hand a stream to the
+parent's own descriptor. Only the last stage of a pipeline may redirect stdout,
+since every earlier stage's stdout is the pipe.
+
+## 8. Follow output as it is produced
+
+`output` returns nothing until the command finishes. `each_line` delivers
+standard output line by line while the command runs, which is what a
+long-running build or test needs in order to report progress. Nothing is
+accumulated, so there is no capture limit.
+
+```mbt check
+///|
+#cfg(not(platform="windows"))
+async test {
+  let seen = []
+  let code = @myshell.Cmd("printf", ["alpha\nbeta\n"]).each_line(line => {
+    seen.push(line)
+  })
+  assert_eq(code, 0)
+  assert_eq(seen, ["alpha", "beta"])
+}
+```
+
+`Pipeline::each_line` follows the last stage the same way.
+
+## 9. Run without capturing output
 
 Use `status` when stdout and stderr should be inherited by the current process.
 It returns only the exit code and has no capture limit.
@@ -206,7 +274,7 @@ async test {
 }
 ```
 
-## 8. Inspect exit status
+## 10. Inspect exit status
 
 `Cmd::output` does not turn a non-zero exit status into an exception. Use
 ordinary MoonBit control flow or call `check()` when failure should raise.
@@ -222,7 +290,7 @@ async test {
 }
 ```
 
-## 9. Pipeline status uses pipefail
+## 11. Pipeline status uses pipefail
 
 `exit_code` is the rightmost non-zero stage status, or zero when all stages
 succeed. Every individual status remains available in `stage_exit_codes`.
@@ -237,7 +305,7 @@ async test {
 }
 ```
 
-## 10. Capture stderr
+## 12. Capture stderr
 
 For pipelines, `stage_stderr` preserves one string per stage and `stderr`
 concatenates them in stage order. Exact bytes remain available as
@@ -256,7 +324,7 @@ async test {
 }
 ```
 
-## 11. Add a timeout
+## 13. Add a timeout
 
 A timeout cancels the structured task and immediately kills each direct child.
 It is not a process-tree deadline: descendants must be contained and reaped by

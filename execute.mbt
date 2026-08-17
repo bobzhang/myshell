@@ -3,12 +3,24 @@
 pub let default_max_output_bytes : Int = 8 * 1024 * 1024
 
 ///|
+/// What the caller wants done with the streams a stage marks `Capture`.
+priv enum Sink {
+  /// Collect into `Output`, bounded by the given aggregate byte limit.
+  Buffer(Int)
+  /// Deliver final stdout one line at a time; nothing is accumulated.
+  Lines(async (String) -> Unit)
+  /// Keep nothing; a `Capture` stream falls back to the parent's descriptor.
+  Discard
+}
+
+///|
 /// Execute this command and capture stdout and stderr.
 ///
 /// Constructing a `Cmd` does not execute it. Captured stdout and stderr share
-/// `max_output_bytes`. When `timeout_ms` expires, the direct child is killed
-/// immediately; descendants require enforcement by the host's native process
-/// sandbox.
+/// `max_output_bytes`; streams sent elsewhere by `stdout` or `stderr` do not
+/// count against it and arrive empty in `Output`. When `timeout_ms` expires,
+/// the direct child is killed immediately; descendants require enforcement by
+/// the host's native process sandbox.
 ///
 /// # Example
 /// ```mbt check
@@ -23,20 +35,17 @@ pub async fn Cmd::output(
   timeout_ms? : Int,
   max_output_bytes? : Int = default_max_output_bytes,
 ) -> Output {
-  validate_cmd(self)
   validate_output_limit(max_output_bytes)
-  let pipeline = { commands: [self] }
-  with_optional_timeout(timeout_ms, () => {
-    run_pipeline(pipeline, max_output_bytes)
-  })
+  Pipeline::{ commands: [self] }.execute(Buffer(max_output_bytes), timeout_ms)
 }
 
 ///|
 /// Execute this command without capturing stdout or stderr.
 ///
-/// The child inherits the current process's stdout and stderr, and this method
-/// returns only its exit status. `stdin` still applies. Use `output` when
-/// captured data is needed.
+/// Streams left as `Capture` are inherited by the current process, because
+/// `status` has no channel to return them on; explicit `ToFile`,
+/// `AppendToFile`, and `Inherit` settings still apply. This method returns
+/// only the exit status and has no capture limit.
 ///
 /// # Example
 /// ```mbt check
@@ -46,8 +55,39 @@ pub async fn Cmd::output(
 /// }
 /// ```
 pub async fn Cmd::status(self : Cmd, timeout_ms? : Int) -> Int {
-  validate_cmd(self)
-  with_optional_timeout(timeout_ms, () => run_status(self))
+  Pipeline::{ commands: [self] }.execute(Discard, timeout_ms).exit_code
+}
+
+///|
+/// Execute this command, delivering standard output one line at a time.
+///
+/// `on_line` receives each line without its terminator, as soon as the child
+/// flushes it, so a long-running command can report progress instead of
+/// arriving as one block at the end. Nothing is accumulated, so there is no
+/// capture limit. A trailing fragment with no newline is delivered as a final
+/// line. Standard error follows the same rule as in `status`.
+///
+/// Raises `StdoutNotCaptured` when `stdout` sends the stream elsewhere, since
+/// there would be nothing to read.
+///
+/// # Example
+/// ```mbt check
+/// #cfg(not(platform="windows"))
+/// async test {
+///   let seen = []
+///   let code = @myshell.Cmd("printf", ["a\nb\n"]).each_line(line => {
+///     seen.push(line)
+///   })
+///   assert_eq(code, 0)
+///   assert_eq(seen, ["a", "b"])
+/// }
+/// ```
+pub async fn Cmd::each_line(
+  self : Cmd,
+  on_line : async (String) -> Unit,
+  timeout_ms? : Int,
+) -> Int {
+  Pipeline::{ commands: [self] }.execute(Lines(on_line), timeout_ms).exit_code
 }
 
 ///|
@@ -73,24 +113,65 @@ pub async fn Pipeline::output(
   timeout_ms? : Int,
   max_output_bytes? : Int = default_max_output_bytes,
 ) -> Output {
-  if self.commands.is_empty() {
+  validate_output_limit(max_output_bytes)
+  self.execute(Buffer(max_output_bytes), timeout_ms)
+}
+
+///|
+/// Execute this pipeline, delivering the last stage's output one line at a
+/// time.
+///
+/// The returned status uses the same pipefail rule as `output`. See
+/// `Cmd::each_line` for how lines are delivered.
+///
+/// # Example
+/// ```mbt check
+/// #cfg(not(platform="windows"))
+/// async test {
+///   let seen = []
+///   @myshell.Pipeline([Cmd("printf", ["alpha\nbeta\n"]), Cmd("grep", ["beta"])]).each_line(line => {
+///       seen.push(line)
+///     },
+///   )
+///   |> ignore
+///   assert_eq(seen, ["beta"])
+/// }
+/// ```
+pub async fn Pipeline::each_line(
+  self : Pipeline,
+  on_line : async (String) -> Unit,
+  timeout_ms? : Int,
+) -> Int {
+  self.execute(Lines(on_line), timeout_ms).exit_code
+}
+
+///|
+/// Validate the whole plan, then run it under an optional deadline.
+async fn Pipeline::execute(
+  self : Pipeline,
+  sink : Sink,
+  timeout_ms : Int?,
+) -> Output {
+  let count = self.commands.length()
+  if count == 0 {
     raise ProcessError::EmptyPipeline
   }
-  validate_output_limit(max_output_bytes)
   for index, cmd in self.commands {
     validate_cmd(cmd)
     if index > 0 && cmd.stdin is Some(_) {
       raise StdinOnNonFirstStage(index)
     }
+    if index + 1 < count && !(cmd.stdout is Capture) {
+      raise RedirectOnNonFinalStage(index)
+    }
   }
-  with_optional_timeout(timeout_ms, () => run_pipeline(self, max_output_bytes))
-}
-
-///|
-async fn[X] with_optional_timeout(timeout_ms : Int?, body : async () -> X) -> X {
+  if sink is Lines(_) && !(self.commands[count - 1].stdout is Capture) {
+    raise StdoutNotCaptured
+  }
   match timeout_ms {
-    None => body()
-    Some(milliseconds) => @async.with_timeout(milliseconds, body)
+    None => run_pipeline(self, sink)
+    Some(milliseconds) =>
+      @async.with_timeout(milliseconds, () => run_pipeline(self, sink))
   }
 }
 
@@ -110,6 +191,11 @@ fn validate_cmd(cmd : Cmd) -> Unit raise ProcessError {
   if cmd.cwd is Some(directory) && directory.contains("\u{0000}") {
     raise NulByte("working directory")
   }
+  if cmd.stdin is Some(FromFile(path)) && path.contains("\u{0000}") {
+    raise NulByte("standard input path")
+  }
+  validate_redirect(cmd.stdout, "standard output path")
+  validate_redirect(cmd.stderr, "standard error path")
   for name, value in cmd.env {
     if name.contains("\u{0000}") {
       raise NulByte("environment name")
@@ -124,6 +210,17 @@ fn validate_cmd(cmd : Cmd) -> Unit raise ProcessError {
 }
 
 ///|
+fn validate_redirect(
+  redirect : Redirect,
+  location : String,
+) -> Unit raise ProcessError {
+  if redirect is (ToFile(path) | AppendToFile(path)) &&
+    path.contains("\u{0000}") {
+    raise NulByte(location)
+  }
+}
+
+///|
 fn validate_output_limit(limit : Int) -> Unit raise ProcessError {
   if limit <= 0 {
     raise InvalidOutputLimit(limit)
@@ -131,12 +228,33 @@ fn validate_output_limit(limit : Int) -> Unit raise ProcessError {
 }
 
 ///|
+/// Turn a `Redirect` into the descriptor a child should receive.
+///
+/// `None` means the child inherits the parent's descriptor. `capture` is the
+/// pipe this run reads from, and is absent when the caller keeps nothing.
+async fn resolve_redirect(
+  redirect : Redirect,
+  capture : @pipe.PipeWrite?,
+) -> &@process.ProcessOutput? {
+  match redirect {
+    Capture => capture.map(writer => writer as &@process.ProcessOutput)
+    Inherit => None
+    ToFile(path) =>
+      Some(@process.redirect_to_file(path, create_mode=CreateOrTruncate))
+    AppendToFile(path) =>
+      Some(
+        @process.redirect_to_file(path, append=true, create_mode=OpenOrCreate),
+      )
+  }
+}
+
+///|
 async fn[X] spawn_stage(
   group : @async.TaskGroup[X],
   cmd : Cmd,
-  stdin : @pipe.PipeRead,
-  stdout : @pipe.PipeWrite,
-  stderr : @pipe.PipeWrite,
+  stdin : &@process.ProcessInput,
+  stdout : &@process.ProcessOutput?,
+  stderr : &@process.ProcessOutput?,
 ) -> @process.Process {
   @process.spawn(
     group,
@@ -145,8 +263,8 @@ async fn[X] spawn_stage(
     extra_env=cmd.env,
     inherit_env=cmd.inherit_env,
     stdin~,
-    stdout~,
-    stderr~,
+    stdout?,
+    stderr?,
     cwd?=cmd.cwd.map(directory => directory[:]),
     no_console_window=cmd.no_console_window,
     cancel_handler=@process.hard_cancel(),
@@ -159,29 +277,8 @@ async fn write_standard_input(writer : @pipe.PipeWrite, input : Stdin?) -> Unit 
   match input {
     Some(Text(text)) => writer.write(text)
     Some(Binary(bytes)) => writer.write(bytes)
-    None => ()
-  }
-}
-
-///|
-async fn run_status(cmd : Cmd) -> Int {
-  let (stdin_reader, stdin_writer) = @pipe.pipe()
-  defer stdin_reader.close()
-  defer stdin_writer.close()
-  @async.with_task_group() <| group => {
-    group.spawn_bg(allow_failure=true, () => {
-      write_standard_input(stdin_writer, cmd.stdin)
-    })
-    @process.run(
-      cmd.program,
-      cmd.arguments,
-      extra_env=cmd.env,
-      inherit_env=cmd.inherit_env,
-      stdin=stdin_reader,
-      cwd?=cmd.cwd.map(directory => directory[:]),
-      no_console_window=cmd.no_console_window,
-      cancel_handler=@process.hard_cancel(),
-    )
+    // `FromFile` never reaches here: it is handed to the child directly.
+    Some(FromFile(_)) | None => ()
   }
 }
 
@@ -231,73 +328,171 @@ async fn read_bounded(
 }
 
 ///|
-async fn run_pipeline(pipeline : Pipeline, max_output_bytes : Int) -> Output {
+/// Deliver every line the child writes, including a final unterminated one.
+///
+/// This splits `read_some` chunks itself rather than using the reader's
+/// `read_until`: that helper decodes strictly, so one invalid byte would abort
+/// the run, and it stops early once its internal buffer fills. Decoding here is
+/// lossy and per line, matching how `Output` treats captured text.
+async fn read_lines(
+  reader : @pipe.PipeRead,
+  on_line : async (String) -> Unit,
+) -> Unit {
+  let pending = @buffer.Buffer(size_hint=4096)
+  while reader.read_some(max_len=4096) is Some(chunk) {
+    let mut start = 0
+    for index in 0..<chunk.length() {
+      if chunk[index] == b'\n' {
+        pending.write_bytesview(chunk[start:index])
+        on_line(@utf8.decode_lossy(pending.to_bytes()))
+        pending.reset()
+        start = index + 1
+      }
+    }
+    pending.write_bytesview(chunk[start:])
+  }
+  if pending.length() > 0 {
+    on_line(@utf8.decode_lossy(pending.to_bytes()))
+  }
+}
+
+///|
+async fn run_pipeline(pipeline : Pipeline, sink : Sink) -> Output {
   let commands = pipeline.commands
   let count = commands.length()
+  let owned : Array[(@pipe.PipeRead, @pipe.PipeWrite)] = []
+  defer close_pipes(owned)
+  //
+  // One pipe joins each adjacent pair of stages.
   let links : Array[(@pipe.PipeRead, @pipe.PipeWrite)] = []
-  defer close_pipes(links)
   for _ in 0..<(count - 1) {
-    links.push(@pipe.pipe())
+    let link = @pipe.pipe()
+    links.push(link)
+    owned.push(link)
   }
-  let stderr_pipes : Array[(@pipe.PipeRead, @pipe.PipeWrite)] = []
-  defer close_pipes(stderr_pipes)
-  for _ in 0..<count {
-    stderr_pipes.push(@pipe.pipe())
+  //
+  // A stage only needs a stderr pipe when this run keeps its stderr.
+  let capture_stderr = sink is Buffer(_)
+  let stderr_pipes : Array[(@pipe.PipeRead, @pipe.PipeWrite)?] = []
+  for cmd in commands {
+    if capture_stderr && cmd.stderr is Capture {
+      let pair = @pipe.pipe()
+      owned.push(pair)
+      stderr_pipes.push(Some(pair))
+    } else {
+      stderr_pipes.push(None)
+    }
   }
-  let (final_stdout_reader, final_stdout_writer) = @pipe.pipe()
-  defer final_stdout_reader.close()
-  defer final_stdout_writer.close()
-  let (first_stdin_reader, first_stdin_writer) = @pipe.pipe()
-  defer first_stdin_reader.close()
-  defer first_stdin_writer.close()
+  //
+  // The final stage needs a stdout pipe unless the caller keeps nothing.
+  let final_stdout = if !(sink is Discard) &&
+    commands[count - 1].stdout is Capture {
+    let pair = @pipe.pipe()
+    owned.push(pair)
+    Some(pair)
+  } else {
+    None
+  }
+  let first_stdin = @pipe.pipe()
+  owned.push(first_stdin)
   @async.with_task_group() <| group => {
     let captured = Ref(0)
-    let stdout_task = group.spawn(() => {
-      defer final_stdout_reader.close()
-      read_bounded(final_stdout_reader, captured, max_output_bytes, "stdout")
-    })
-    let stderr_tasks : Array[@async.Task[Bytes]] = []
-    for pair in stderr_pipes {
-      let (reader, _) = pair
-      stderr_tasks.push(
-        group.spawn(() => {
-          defer reader.close()
-          read_bounded(reader, captured, max_output_bytes, "stderr")
-        }),
-      )
+    let limit = match sink {
+      Buffer(limit) => limit
+      _ => 0
     }
-    group.spawn_bg(allow_failure=true, () => {
-      write_standard_input(first_stdin_writer, commands[0].stdin)
-    })
+    //
+    // Readers start before the children so a full pipe never deadlocks.
+    let stdout_task = match (final_stdout, sink) {
+      (Some((reader, _)), Buffer(_)) =>
+        Some(
+          group.spawn(() => {
+            defer reader.close()
+            read_bounded(reader, captured, limit, "stdout")
+          }),
+        )
+      (Some((reader, _)), Lines(on_line)) => {
+        group.spawn_bg(() => {
+          defer reader.close()
+          read_lines(reader, on_line)
+        })
+        None
+      }
+      _ => None
+    }
+    let stderr_tasks : Array[@async.Task[Bytes]?] = []
+    for pair in stderr_pipes {
+      match pair {
+        Some((reader, _)) =>
+          stderr_tasks.push(
+            Some(
+              group.spawn(() => {
+                defer reader.close()
+                read_bounded(reader, captured, limit, "stderr")
+              }),
+            ),
+          )
+        None => stderr_tasks.push(None)
+      }
+    }
+    //
+    // Standard input for the first stage: a file the child reads itself, or a
+    // pipe this task fills.
+    let first_input : &@process.ProcessInput = match commands[0].stdin {
+      Some(FromFile(path)) => @process.redirect_from_file(path)
+      input => {
+        group.spawn_bg(allow_failure=true, () => {
+          write_standard_input(first_stdin.1, input)
+        })
+        first_stdin.0
+      }
+    }
     let processes : Array[@process.Process] = []
     for index, cmd in commands {
-      let stdin = if index == 0 {
-        first_stdin_reader
+      let stdin : &@process.ProcessInput = if index == 0 {
+        first_input
       } else {
         links[index - 1].0
       }
-      let stdout = if index + 1 == count {
-        final_stdout_writer
+      let stdout = if index + 1 < count {
+        Some(links[index].1 as &@process.ProcessOutput)
       } else {
-        links[index].1
+        resolve_redirect(cmd.stdout, final_stdout.map(pair => pair.1))
       }
-      let stderr = stderr_pipes[index].1
-      let child = spawn_stage(group, cmd, stdin, stdout, stderr)
-      processes.push(child)
-      stdin.close()
-      stdout.close()
-      stderr.close()
+      let stderr = resolve_redirect(
+        cmd.stderr,
+        stderr_pipes[index].map(pair => pair.1),
+      )
+      processes.push(spawn_stage(group, cmd, stdin, stdout, stderr))
+      //
+      // Drop this parent's ends so the reader sees EOF once the child exits.
+      if index > 0 {
+        links[index - 1].0.close()
+      }
+      if index + 1 < count {
+        links[index].1.close()
+      }
+      if stderr_pipes[index] is Some((_, writer)) {
+        writer.close()
+      }
     }
-    let exit_codes : Array[Int] = []
-    for child in processes {
-      exit_codes.push(child.wait())
+    if final_stdout is Some((_, writer)) {
+      writer.close()
     }
-    let stdout_bytes = stdout_task.wait()
+    first_stdin.0.close()
+    let exit_codes = [ for child in processes => child.wait() ]
+    let stdout_bytes = match stdout_task {
+      Some(task) => task.wait()
+      None => b""
+    }
     let stage_stderr_bytes : Array[Bytes] = []
     let stage_stderr : Array[String] = []
     let stderr = StringBuilder()
     for task in stderr_tasks {
-      let stage_bytes = task.wait()
+      let stage_bytes = match task {
+        Some(task) => task.wait()
+        None => b""
+      }
       let stage = @utf8.decode_lossy(stage_bytes)
       stage_stderr_bytes.push(stage_bytes)
       stage_stderr.push(stage)

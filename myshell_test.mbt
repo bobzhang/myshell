@@ -25,6 +25,8 @@ test "defaults keep a command closed and inherited" {
       #|  env: {},
       #|  inherit_env: true,
       #|  stdin: None,
+      #|  stdout: Capture,
+      #|  stderr: Capture,
       #|  no_console_window: false,
       #|}
     ),
@@ -276,5 +278,125 @@ async test "timeout cancels the child" {
     _ => fail("unexpected error")
   } noraise {
     _ => fail("expected TimeoutError")
+  }
+}
+
+///|
+#cfg(not(platform="windows"))
+async test "stdout can be sent to a file and appended to" {
+  let path = "/tmp/myshell-redirect-test.txt"
+  @myshell.Cmd("printf", ["first\n"], stdout=ToFile(path)).status() |> ignore
+  @myshell.Cmd("printf", ["second\n"], stdout=AppendToFile(path)).status()
+  |> ignore
+  let readback = @myshell.Cmd("cat", [path]).output()
+  inspect(readback.stdout, content="first\nsecond\n")
+  // `ToFile` truncates, so the appended line is gone again.
+  @myshell.Cmd("printf", ["third\n"], stdout=ToFile(path)).status() |> ignore
+  inspect(@myshell.Cmd("cat", [path]).output().stdout, content="third\n")
+  @myshell.Cmd("rm", ["-f", path]).status() |> ignore
+}
+
+///|
+#cfg(not(platform="windows"))
+async test "a redirected stream is absent from the captured output" {
+  let path = "/tmp/myshell-redirect-stderr.txt"
+  let output = @myshell.Cmd(
+    "/usr/bin/awk",
+    ["BEGIN { print \"out\"; print \"err\" > \"/dev/stderr\" }"],
+    stderr=ToFile(path),
+  ).output()
+  inspect(output.stdout, content="out\n")
+  inspect(output.stderr, content="")
+  inspect(@myshell.Cmd("cat", [path]).output().stdout, content="err\n")
+  @myshell.Cmd("rm", ["-f", path]).status() |> ignore
+}
+
+///|
+#cfg(not(platform="windows"))
+async test "stdin can be read from a file" {
+  let path = "/tmp/myshell-stdin-source.txt"
+  @myshell.Cmd("printf", ["from file\n"], stdout=ToFile(path)).status()
+  |> ignore
+  let output = @myshell.Cmd("cat", [], stdin=FromFile(path)).output()
+  inspect(output.stdout, content="from file\n")
+  @myshell.Cmd("rm", ["-f", path]).status() |> ignore
+}
+
+///|
+#cfg(not(platform="windows"))
+async test "each_line delivers stdout incrementally" {
+  let seen = []
+  let code = @myshell.Cmd("printf", ["alpha\nbeta\ngamma"]).each_line(line => {
+    seen.push(line)
+  })
+  inspect(code, content="0")
+  // The unterminated trailing fragment is still delivered.
+  assert_eq(seen, ["alpha", "beta", "gamma"])
+}
+
+///|
+#cfg(not(platform="windows"))
+async test "each_line follows the last stage of a pipeline" {
+  let seen = []
+  let code = @myshell.Pipeline([
+    Cmd("printf", ["alpha\nbeta\ngamma\n"]),
+    Cmd("grep", ["mm"]),
+  ]).each_line(line => seen.push(line))
+  inspect(code, content="0")
+  assert_eq(seen, ["gamma"])
+}
+
+///|
+#cfg(not(platform="windows"))
+async test "each_line streams past what a buffered limit would allow" {
+  let program = "BEGIN { for (i = 0; i < 1000; i++) print \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" }"
+  let lines = Ref(0)
+  let bytes = Ref(0)
+  @myshell.Cmd("/usr/bin/awk", [program]).each_line(line => {
+    lines.val = lines.val + 1
+    bytes.val = bytes.val + line.length()
+  })
+  |> ignore
+  inspect(lines.val, content="1000")
+  inspect(bytes.val, content="30000")
+  // The same command cannot be captured under a limit that small.
+  try
+    @myshell.Cmd("/usr/bin/awk", [program]).output(max_output_bytes=1024)
+  catch {
+    @myshell.ProcessError::OutputLimitExceeded(_) => ()
+    _ => fail("unexpected error")
+  } noraise {
+    _ => fail("expected OutputLimitExceeded")
+  }
+}
+
+///|
+async test "redirection is rejected where it would break the plan" {
+  try
+    @myshell.Pipeline([
+      Cmd("first", [], stdout=ToFile("/tmp/nope")),
+      Cmd("second", []),
+    ]).output()
+  catch {
+    @myshell.ProcessError::RedirectOnNonFinalStage(index) =>
+      inspect(index, content="0")
+    _ => fail("unexpected error")
+  } noraise {
+    _ => fail("expected RedirectOnNonFinalStage")
+  }
+  try @myshell.Cmd("printf", [], stdout=Inherit).each_line(_line => ()) catch {
+    @myshell.ProcessError::StdoutNotCaptured => ()
+    _ => fail("unexpected error")
+  } noraise {
+    _ => fail("expected StdoutNotCaptured")
+  }
+  try
+    @myshell.Cmd("printf", [], stdout=ToFile("bad\u{0000}path")).output()
+  catch {
+    @myshell.ProcessError::NulByte(location) =>
+      inspect(location, content="standard output path")
+    _ => fail("unexpected error")
+  } noraise {
+    _ => fail("expected NulByte")
   }
 }
