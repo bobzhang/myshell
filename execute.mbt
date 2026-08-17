@@ -69,10 +69,11 @@ pub async fn Cmd::status(self : Cmd, timeout_ms? : Int) -> Int {
 /// as in `status`.
 ///
 /// Completed lines are not retained, so total output is unbounded. One line is
-/// held while it is assembled, and `max_line_bytes` caps it exactly: any single
-/// line longer than that raises `OutputLimitExceeded`, whether or not a newline
-/// ever arrives. A child that emits no newline therefore cannot exhaust
-/// memory.
+/// held while it is assembled, and `max_line_bytes` caps its content exactly:
+/// any single line longer than that raises `OutputLimitExceeded`, whether or
+/// not a newline ever arrives, so a child that emits no newline cannot exhaust
+/// memory. A CRLF terminator's CR is punctuation rather than content and does
+/// not consume the allowance.
 ///
 /// Raises `StdoutNotCaptured` when `stdout` sends the stream elsewhere, since
 /// there would be nothing to read.
@@ -355,9 +356,10 @@ async fn read_bounded(
 /// the run, and it stops early once its internal buffer fills. Decoding here is
 /// lossy and per line, matching how `Output` treats captured text.
 ///
-/// Only one line is held at a time, and `limit` caps that line exactly: every
-/// append is refused before it would carry the line past the limit, so a child
-/// that never emits a newline cannot grow it without bound.
+/// Only one line is held at a time, and `limit` caps that line's content
+/// exactly, so a child that never emits a newline cannot grow it without
+/// bound. A CRLF terminator's CR is punctuation, not content, and so does not
+/// consume the line's allowance.
 async fn read_lines(
   reader : @pipe.PipeRead,
   on_line : async (String) -> Unit,
@@ -369,28 +371,32 @@ async fn read_lines(
     for index in 0..<chunk.length() {
       if chunk[index] == b'\n' {
         extend_line(pending, chunk[start:index], limit)
-        on_line(take_line(pending, terminated=true))
+        on_line(take_line(pending, terminated=true, limit))
         start = index + 1
       }
     }
     extend_line(pending, chunk[start:], limit)
   }
   if pending.length() > 0 {
-    on_line(take_line(pending, terminated=false))
+    on_line(take_line(pending, terminated=false, limit))
   }
 }
 
 ///|
-/// Append to the line being assembled, refusing to grow it past `limit`.
+/// Append to the line being assembled, refusing to buffer more than one line.
 ///
-/// Checking before the write is what makes the cap exact: `pending` never holds
-/// more than `limit` bytes, whether or not the line is ever terminated.
+/// `limit` counts line content, and the CR of a CRLF terminator is not content.
+/// Whether a trailing CR is a terminator is only known once the LF arrives, so
+/// one byte of headroom is allowed here and `take_line` makes the final ruling.
 fn extend_line(
   pending : @buffer.Buffer,
   view : BytesView,
   limit : Int,
 ) -> Unit raise ProcessError {
-  if pending.length() + view.length() > limit {
+  let projected = pending.length() + view.length()
+  // Written this way rather than `projected > limit + 1` so that a caller
+  // passing a limit near `Int`'s maximum cannot overflow the comparison.
+  if projected > limit && projected - limit > 1 {
     raise OutputLimitExceeded(stream="stdout line", limit~)
   }
   pending.write_bytesview(view)
@@ -401,8 +407,13 @@ fn extend_line(
 ///
 /// The CR of a CRLF terminator is dropped, but only for a line that a newline
 /// actually terminated: a lone trailing CR in the final unterminated fragment
-/// is data, not punctuation.
-fn take_line(pending : @buffer.Buffer, terminated~ : Bool) -> String {
+/// is data, not punctuation. What remains is the line content, so this is where
+/// `limit` is decided.
+fn take_line(
+  pending : @buffer.Buffer,
+  terminated~ : Bool,
+  limit : Int,
+) -> String raise ProcessError {
   let raw = pending.to_bytes()
   pending.reset()
   let length = raw.length()
@@ -410,6 +421,9 @@ fn take_line(pending : @buffer.Buffer, terminated~ : Bool) -> String {
     raw[:length - 1].to_owned()
   } else {
     raw
+  }
+  if bytes.length() > limit {
+    raise OutputLimitExceeded(stream="stdout line", limit~)
   }
   @utf8.decode_lossy(bytes)
 }

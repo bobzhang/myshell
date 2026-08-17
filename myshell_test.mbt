@@ -468,3 +468,27 @@ async test "a lone trailing carriage return is data, not a terminator" {
   // "a\r\n" is a CRLF line; the final "b\r" was never terminated.
   assert_eq(seen, ["a", "b\r"])
 }
+
+///|
+#cfg(not(platform="windows"))
+async test "a CRLF terminator does not consume the line allowance" {
+  // The content is one byte; the CR belongs to the terminator.
+  let seen = []
+  @myshell.Cmd("printf", ["a\r\n"]).each_line(
+    line => seen.push(line),
+    max_line_bytes=1,
+  )
+  |> ignore
+  assert_eq(seen, ["a"])
+  // Two bytes of content under the same limit is still too much.
+  try
+    @myshell.Cmd("printf", ["ab\r\n"]).each_line(_line => (), max_line_bytes=1)
+    |> ignore
+  catch {
+    @myshell.ProcessError::OutputLimitExceeded(limit~, ..) =>
+      inspect(limit, content="1")
+    _ => fail("unexpected error")
+  } noraise {
+    _ => fail("expected OutputLimitExceeded")
+  }
+}
