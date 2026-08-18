@@ -449,64 +449,20 @@ async fn run_pipeline(pipeline : Pipeline, sink : Sink) -> Output {
   // instead of blocking. `read_from_process` and `write_to_process` keep the
   // child's end blocking, which is the whole point of using them here.
   //
-  // A stage only needs a stderr pipe when this run keeps its stderr.
+  // Every descriptor is created immediately before the spawn that consumes it.
+  // A handle only reaches its owner through `after_spawn`, and there is no
+  // close operation on `&ProcessInput` / `&ProcessOutput`, so anything created
+  // for a spawn that never happens cannot be reclaimed. Creating late keeps
+  // that to the stage being started rather than the whole pipeline.
   let capture_stderr = sink is Buffer(_)
-  let stderr_pipes : Array[(@process.ReadFromProcess, &@process.ProcessOutput)?] = []
-  for cmd in commands {
-    if capture_stderr && cmd.stderr is Capture {
-      stderr_pipes.push(Some(@process.read_from_process()))
-    } else {
-      stderr_pipes.push(None)
-    }
-  }
-  //
-  // The final stage needs a stdout pipe unless the caller keeps nothing.
-  let final_stdout = if !(sink is Discard) &&
-    commands[count - 1].stdout is Capture {
-    Some(@process.read_from_process())
-  } else {
-    None
-  }
   @async.with_task_group() <| group => {
     let captured = Ref(0)
     let limit = match sink {
       Buffer(limit) => limit
       _ => 0
     }
-    //
-    // Readers start before the children so a full pipe never deadlocks.
-    let stdout_task = match (final_stdout, sink) {
-      (Some((reader, _)), Buffer(_)) =>
-        Some(
-          group.spawn(() => {
-            defer reader.close()
-            read_bounded(reader, captured, limit, "stdout")
-          }),
-        )
-      (Some((reader, _)), Lines(on_line, line_limit)) => {
-        group.spawn_bg(() => {
-          defer reader.close()
-          read_lines(reader, on_line, line_limit)
-        })
-        None
-      }
-      _ => None
-    }
+    let mut stdout_task : @async.Task[Bytes]? = None
     let stderr_tasks : Array[@async.Task[Bytes]?] = []
-    for pair in stderr_pipes {
-      match pair {
-        Some((reader, _)) =>
-          stderr_tasks.push(
-            Some(
-              group.spawn(() => {
-                defer reader.close()
-                read_bounded(reader, captured, limit, "stderr")
-              }),
-            ),
-          )
-        None => stderr_tasks.push(None)
-      }
-    }
     //
     // Standard input for the first stage: a file the child reads itself, or a
     // pipe this task fills.
@@ -549,22 +505,58 @@ async fn run_pipeline(pipeline : Pipeline, sink : Sink) -> Output {
         group.spawn_bg(() => {
           defer reader.close()
           defer writer.close()
-          try {
-            while reader.read_some(max_len=4096) is Some(chunk) {
-              writer.write(chunk)
+          for ;; {
+            // A read failure is a real fault and propagates; only the write
+            // may fail benignly, when the consumer has stopped reading.
+            match reader.read_some(max_len=4096) {
+              None => break
+              Some(chunk) => writer.write(chunk) catch { _ => break }
             }
-          } catch {
-            _ => ()
           }
         })
         Some(child_stdout)
       } else {
-        resolve_redirect(cmd.stdout, final_stdout.map(pair => pair.1))
+        let final_capture = if !(sink is Discard) && cmd.stdout is Capture {
+          let (reader, child_stdout) = @process.read_from_process()
+          match sink {
+            Buffer(_) =>
+              stdout_task = Some(
+                group.spawn(() => {
+                  defer reader.close()
+                  read_bounded(reader, captured, limit, "stdout")
+                }),
+              )
+            Lines(on_line, line_limit) =>
+              group.spawn_bg(() => {
+                defer reader.close()
+                read_lines(reader, on_line, line_limit)
+              })
+            Discard => ()
+          }
+          Some(child_stdout)
+        } else {
+          None
+        }
+        resolve_redirect(cmd.stdout, final_capture)
       }
-      let stderr = resolve_redirect(
-        cmd.stderr,
-        stderr_pipes[index].map(pair => pair.1),
-      )
+      //
+      // Each reader starts before its child, so a full pipe never stalls one.
+      let stderr_capture = if capture_stderr && cmd.stderr is Capture {
+        let (reader, child_stderr) = @process.read_from_process()
+        stderr_tasks.push(
+          Some(
+            group.spawn(() => {
+              defer reader.close()
+              read_bounded(reader, captured, limit, "stderr")
+            }),
+          ),
+        )
+        Some(child_stderr)
+      } else {
+        stderr_tasks.push(None)
+        None
+      }
+      let stderr = resolve_redirect(cmd.stderr, stderr_capture)
       //
       // No descriptor needs closing by hand any more: every child-side end
       // comes from `read_from_process` / `write_to_process` / a file redirect,

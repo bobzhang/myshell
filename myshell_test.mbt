@@ -612,15 +612,20 @@ async test "streaming a large output delivers every line" {
 
 ///|
 #cfg(not(platform="windows"))
-async test "a large payload crosses every stage of a pipeline" {
-  let program = "BEGIN { for (i = 0; i < 20000; i++) print \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" }"
-  let output = @myshell.Pipeline([
-    Cmd("/usr/bin/awk", [program]),
+async test "a large payload crosses every stage of a pipeline unchanged" {
+  // Every line differs, so this catches reordering and any loss or
+  // duplication that happens to preserve the byte count — which a payload of
+  // identical lines would not. It spans many 4096-byte relay reads.
+  let direct = @myshell.Cmd("seq", ["1", "100000"]).output().check()
+  assert_true(direct.stdout_bytes.length() > 500000)
+  let piped = @myshell.Pipeline([
+    Cmd("seq", ["1", "100000"]),
     Cmd("cat", []),
     Cmd("cat", []),
   ]).output()
-  debug_inspect(output.stage_exit_codes, content="[0, 0, 0]")
-  inspect(output.stdout_bytes.length(), content="620000")
+  debug_inspect(piped.stage_exit_codes, content="[0, 0, 0]")
+  // Byte-for-byte, not merely the same length.
+  assert_eq(piped.stdout_bytes, direct.stdout_bytes)
 }
 
 ///|
