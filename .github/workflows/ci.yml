@@ -23,6 +23,9 @@ jobs:
       - name: Version
         run: moon version --all
 
+      - name: Update registry index
+        run: moon update
+
       - name: Check
         run: moon check --deny-warn
 
