@@ -8,6 +8,10 @@ import {
 // Values
 pub let default_max_output_bytes : Int
 
+pub async fn glob(String, cwd? : String) -> Array[String]
+
+pub fn glob_matches(String, String) -> Bool
+
 // Errors
 pub(all) suberror ProcessError {
   EmptyProgram
