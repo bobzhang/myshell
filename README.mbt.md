@@ -407,6 +407,41 @@ async fn main {
 }'
 ```
 
+## 15. Expand paths without a shell
+
+A shell expands `*.mbt` into arguments before the command ever runs. `glob` does
+the same expansion as an ordinary value, so the result can be inspected, and
+each match reaches the child as one literal argument — a filename containing a
+space, a quote, or a `*` cannot be re-split or re-expanded on the way.
+
+```mbt check
+///|
+#cfg(not(platform="windows"))
+async test {
+  let sources = @myshell.glob("*.mbt")
+  assert_true(sources.contains("execute.mbt"))
+  let output = @myshell.Cmd("wc", ["-l", ..sources]).output()
+  assert_true(output.success())
+}
+```
+
+`*` and `?` stay within one path segment, `[a-z]` and `[!a-z]` match a character
+from a set, and `**` as a whole segment spans any number of segments. A leading
+`.` is matched only by a literal `.`, so `*` does not pick up hidden entries.
+Matches come back in code-unit order, and a pattern that matches nothing returns
+an empty array rather than the pattern itself.
+
+`glob_matches` is the same pattern language without touching the disk, for
+filtering names already in hand:
+
+```mbt check
+///|
+test {
+  assert_true(@myshell.glob_matches("src/**/*.mbt", "src/a/b/cmd.mbt"))
+  assert_false(@myshell.glob_matches("*.mbt", "src/cmd.mbt"))
+}
+```
+
 ## Security boundary
 
 This package removes shell parsing and keeps each process invocation structured;
