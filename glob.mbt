@@ -35,7 +35,29 @@ priv enum Item {
 /// }
 /// ```
 pub fn glob_matches(pattern : String, name : String) -> Bool {
-  match_segments(split_path(pattern), split_path(name))
+  match_segments(split_path(pattern), split_name(name))
+}
+
+///|
+/// Split a name on `/`, with no pattern syntax of any kind.
+///
+/// A candidate is a path, not a pattern: a backslash in it is one of its
+/// characters. Splitting it the way a pattern is split would quietly rename
+/// `dir\` to `dir`, and make `glob_matches` accept a name that `glob` could
+/// never produce.
+fn split_name(name : String) -> Array[String] {
+  let segments = []
+  let current = StringBuilder()
+  for char in name {
+    if char == '/' {
+      segments.push(current.to_string())
+      current.reset()
+    } else {
+      current.write_char(char)
+    }
+  }
+  segments.push(current.to_string())
+  segments
 }
 
 ///|
@@ -221,9 +243,9 @@ fn parse_class(
     } else {
       (chars[index], index + 1)
     }
-    let escaped_low = after_low == index + 2
-    if !escaped_low &&
-      after_low + 1 < chars.length() &&
+    // Only an escaped `-` is prevented from forming a range; escaping an
+    // endpoint, as in `[\a-c]`, leaves the range intact, as a shell has it.
+    if after_low + 1 < chars.length() &&
       chars[after_low] == '-' &&
       chars[after_low + 1] != ']' {
       let (high, after_high) = if chars[after_low + 1] == '\\' &&
@@ -328,7 +350,8 @@ fn item_matches(item : Item, candidate : Char) -> Bool {
 /// ```
 pub async fn glob(pattern : String, cwd? : String = ".") -> Array[String] {
   let raw = split_path(pattern)
-  let absolute = raw is [first, ..] && first.is_empty()
+  // An empty pattern is not the root: only a leading separator is.
+  let absolute = pattern.has_prefix("/")
   // A trailing `/` asks for directories only; it is not a segment.
   // A trailing `/` asks for directories only. A pattern that is nothing but
   // separators is just the root, with no trailing request attached.

@@ -227,3 +227,21 @@ async test "a pattern of only separators is the root" {
   assert_eq(@myshell.glob("//"), ["/"])
   assert_eq(@myshell.glob("///"), ["/"])
 }
+
+///|
+test "a candidate is a path, not a pattern" {
+  // The backslash in the name is one of its characters, so this name has a
+  // single component called `dir\file` and does not match two components.
+  assert_false(@myshell.glob_matches("dir/file", "dir\\/file"))
+  assert_true(@myshell.glob_matches("dir\\/file", "dir/file"))
+  // Escaping an endpoint leaves the range intact; escaping the `-` does not.
+  assert_true(@myshell.glob_matches("[\\a-c]", "b"))
+  assert_false(@myshell.glob_matches("[a\\-c]", "b"))
+}
+
+///|
+#cfg(not(platform="windows"))
+async test "an empty pattern matches nothing and is not the root" {
+  assert_eq(@myshell.glob(""), [])
+  assert_eq(@myshell.glob("", cwd="/tmp"), [])
+}
