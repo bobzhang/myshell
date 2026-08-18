@@ -426,10 +426,16 @@ async test {
 ```
 
 `*` and `?` stay within one path segment, `[a-z]` and `[!a-z]` match a character
-from a set, and `**` as a whole segment spans any number of segments. A leading
-`.` is matched only by a literal `.`, so `*` does not pick up hidden entries.
-Matches come back in code-unit order, and a pattern that matches nothing returns
-an empty array rather than the pattern itself.
+from a set, `\` makes the next character literal, and `**` as a whole segment
+spans any number of segments. A leading `.` is matched only by a literal `.`, so
+neither `*` nor `**` reaches hidden entries. A trailing `/` restricts the result
+to directories and is kept. Matches come back in code-unit order with no
+duplicates, and a pattern that matches nothing returns an empty array rather
+than the pattern itself.
+
+`**` does not descend symbolic links, which is what keeps a link pointing at an
+ancestor from looping forever; a component you name yourself resolves links
+normally. `.` and `..` are never produced.
 
 `glob_matches` is the same pattern language without touching the disk, for
 filtering names already in hand:
