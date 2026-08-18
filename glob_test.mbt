@@ -127,7 +127,13 @@ async test "a symlink loop does not trap the walker" {
   let root = temp_dir()
   make_tree(root, ["deep/inner/target.mbt"])
   // A link pointing back at an ancestor: following it would never terminate.
-  @myshell.Cmd("ln", ["-s", "\{root}", "\{root}/deep/loop"]).status() |> ignore
+  assert_eq(
+    @myshell.Cmd("ln", ["-s", "\{root}", "\{root}/deep/loop"]).status(),
+    0,
+  )
+  // Without this the tree alone would satisfy the assertion below, and the
+  // test would pass on a system where the link was never created.
+  assert_eq(@myshell.Cmd("test", ["-L", "\{root}/deep/loop"]).status(), 0)
   assert_eq(@myshell.glob("**/*.mbt", cwd=root), ["deep/inner/target.mbt"])
   @myshell.Cmd("rm", ["-rf", root]).status() |> ignore
 }
@@ -157,4 +163,67 @@ async test "an expansion feeds a command as separate literal arguments" {
   let output = @myshell.Cmd("ls", matched, cwd=root).output().check()
   assert_eq(output.stdout.split("\n").filter(l => !l.is_empty()).length(), 2)
   @myshell.Cmd("rm", ["-rf", root]).status() |> ignore
+}
+
+///|
+test "escapes survive splitting and character classes" {
+  // An escaped separator is still a separator, as a shell resolves it.
+  assert_true(
+    @myshell.glob_matches("cmd\\/smoke/main.mbt", "cmd/smoke/main.mbt"),
+  )
+  // Inside a class, a backslash makes the next character a plain member, so
+  // this is the three characters and not the range `a` to `c`.
+  assert_true(@myshell.glob_matches("[a\\-c]", "-"))
+  assert_true(@myshell.glob_matches("[a\\-c]", "a"))
+  assert_true(@myshell.glob_matches("[a\\-c]", "c"))
+  assert_false(@myshell.glob_matches("[a\\-c]", "b"))
+  // An unescaped range still behaves as one.
+  assert_true(@myshell.glob_matches("[a-c]", "b"))
+  assert_true(@myshell.glob_matches("[\\]]", "]"))
+}
+
+///|
+#cfg(not(platform="windows"))
+async test "adjacent globstars do not explode on a deep tree" {
+  let root = temp_dir()
+  // Twenty nested directories. Exploring every way of splitting this path
+  // between the globstars would be combinatorial; visiting each place in the
+  // tree once per place in the pattern is not.
+  let deep = "a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a"
+  make_tree(root, ["\{deep}/target.mbt"])
+  assert_eq(@myshell.glob("**/**/**/**/target.mbt", cwd=root), [
+    "\{deep}/target.mbt",
+  ])
+  // The same pattern for a name that is not there has to finish too.
+  assert_eq(@myshell.glob("**/**/**/**/missing.mbt", cwd=root), [])
+  @myshell.Cmd("rm", ["-rf", root]).status() |> ignore
+}
+
+///|
+#cfg(not(platform="windows"))
+async test "a dangling or self-referential link still matches" {
+  let root = temp_dir()
+  make_tree(root, ["real.txt"])
+  assert_eq(
+    @myshell.Cmd("ln", ["-s", "nowhere.txt", "\{root}/dangling.txt"]).status(),
+    0,
+  )
+  assert_eq(
+    @myshell.Cmd("ln", ["-s", "self.txt", "\{root}/self.txt"]).status(),
+    0,
+  )
+  // A glob matches the directory entry, so a link that resolves to nothing is
+  // still a match, and one that points at itself must not raise `ELOOP`.
+  assert_eq(@myshell.glob("*.txt", cwd=root), [
+    "dangling.txt", "real.txt", "self.txt",
+  ])
+  @myshell.Cmd("rm", ["-rf", root]).status() |> ignore
+}
+
+///|
+#cfg(not(platform="windows"))
+async test "a pattern of only separators is the root" {
+  assert_eq(@myshell.glob("/"), ["/"])
+  assert_eq(@myshell.glob("//"), ["/"])
+  assert_eq(@myshell.glob("///"), ["/"])
 }
