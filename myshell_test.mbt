@@ -631,3 +631,18 @@ async test "a large payload can be written to a child's standard input" {
   inspect(output.exit_code, content="0")
   inspect(output.stdout.length(), content="409600")
 }
+
+///|
+#cfg(not(platform="windows"))
+async test "a stage may stop reading before the one feeding it finishes" {
+  // `yes` never ends on its own; `head` closes its input after one line. The
+  // pipeline has to finish anyway, rather than failing on the broken pipe.
+  let output = @myshell.Pipeline([Cmd("yes", []), Cmd("head", ["-n", "1"])]).output(
+    timeout_ms=10000,
+  )
+  inspect(output.stdout, content="y\n")
+  // The producer is cut off by the broken pipe, which pipefail reports.
+  inspect(output.stage_exit_codes.length(), content="2")
+  inspect(output.stage_exit_codes[1], content="0")
+  assert_true(output.stage_exit_codes[0] != 0)
+}

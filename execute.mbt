@@ -442,16 +442,6 @@ async fn run_pipeline(pipeline : Pipeline, sink : Sink) -> Output {
   // descriptor, and `read_from_process` / `write_to_process` are the only way
   // to get one today. The cost is that bytes cross the parent instead of
   // travelling between the two children directly.
-  let junction_out : Array[&@process.ProcessOutput] = []
-  let junction_in : Array[&@process.ProcessInput] = []
-  let relays : Array[(@process.ReadFromProcess, @process.WriteToProcess)] = []
-  for _ in 0..<(count - 1) {
-    let (reader, child_stdout) = @process.read_from_process()
-    let (child_stdin, writer) = @process.write_to_process()
-    junction_out.push(child_stdout)
-    junction_in.push(child_stdin)
-    relays.push((reader, writer))
-  }
   //
   // Everything the parent itself reads or writes uses the process-owned pipes.
   // `@pipe.pipe()` makes both ends non-blocking, and that flag survives into
@@ -502,19 +492,6 @@ async fn run_pipeline(pipeline : Pipeline, sink : Sink) -> Output {
       }
       _ => None
     }
-    //
-    // One relay per junction, started before the children so that a full pipe
-    // never stalls a stage.
-    for relay in relays {
-      let (reader, writer) = relay
-      group.spawn_bg(() => {
-        defer reader.close()
-        defer writer.close()
-        while reader.read_some(max_len=4096) is Some(chunk) {
-          writer.write(chunk)
-        }
-      })
-    }
     let stderr_tasks : Array[@async.Task[Bytes]?] = []
     for pair in stderr_pipes {
       match pair {
@@ -544,14 +521,43 @@ async fn run_pipeline(pipeline : Pipeline, sink : Sink) -> Output {
       }
     }
     let processes : Array[@process.Process] = []
+    let mut next_stdin : &@process.ProcessInput? = None
     for index, cmd in commands {
       let stdin : &@process.ProcessInput = if index == 0 {
         first_input
       } else {
-        junction_in[index - 1]
+        guard next_stdin is Some(input) else {
+          abort("a later stage always has a junction")
+        }
+        input
       }
+      //
+      // The junction to the next stage is built here rather than up front, so
+      // that a stage which fails to spawn strands one junction instead of one
+      // per stage. Its relay starts immediately, before this stage can fill
+      // the pipe.
+      //
+      // A downstream stage may stop reading early — `head -n 1` is the usual
+      // example — and the write then fails with a broken pipe. That is the
+      // normal end of a relay, not a failure of the run, so it stops quietly.
+      // Closing both ends lets the upstream stage see the broken pipe too,
+      // which is what it would see if the two children shared one descriptor.
       let stdout = if index + 1 < count {
-        Some(junction_out[index])
+        let (reader, child_stdout) = @process.read_from_process()
+        let (child_stdin, writer) = @process.write_to_process()
+        next_stdin = Some(child_stdin)
+        group.spawn_bg(() => {
+          defer reader.close()
+          defer writer.close()
+          try {
+            while reader.read_some(max_len=4096) is Some(chunk) {
+              writer.write(chunk)
+            }
+          } catch {
+            _ => ()
+          }
+        })
+        Some(child_stdout)
       } else {
         resolve_redirect(cmd.stdout, final_stdout.map(pair => pair.1))
       }
