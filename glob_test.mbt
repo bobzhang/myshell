@@ -245,3 +245,13 @@ async test "an empty pattern matches nothing and is not the root" {
   assert_eq(@myshell.glob(""), [])
   assert_eq(@myshell.glob("", cwd="/tmp"), [])
 }
+
+///|
+#cfg(not(platform="windows"))
+async test "an escaped leading separator is still absolute" {
+  let root = temp_dir()
+  make_tree(root, ["tmp/decoy.txt"])
+  // `\/tmp` denotes `/tmp`, so this must not search `<root>/tmp`.
+  assert_false(@myshell.glob("\\/tmp/*", cwd=root).contains("tmp/decoy.txt"))
+  @myshell.Cmd("rm", ["-rf", root]).status() |> ignore
+}
