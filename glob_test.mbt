@@ -8,11 +8,6 @@ test "the matcher is a shell's filename language and nothing more" {
   assert_true(@myshell.glob_matches("c?d.mbt", "cmd.mbt"))
   assert_false(@myshell.glob_matches("c?d.mbt", "cd.mbt"))
   assert_false(@myshell.glob_matches("?", "/"))
-  // `**` spans segments, including none at all.
-  assert_true(@myshell.glob_matches("src/**/*.mbt", "src/cmd.mbt"))
-  assert_true(@myshell.glob_matches("src/**/*.mbt", "src/a/b/cmd.mbt"))
-  assert_true(@myshell.glob_matches("**", "a/b/c"))
-  assert_false(@myshell.glob_matches("src/**/*.mbt", "other/cmd.mbt"))
   // Character classes, ranges, and negation.
   assert_true(@myshell.glob_matches("[abc].mbt", "b.mbt"))
   assert_false(@myshell.glob_matches("[abc].mbt", "d.mbt"))
@@ -21,34 +16,84 @@ test "the matcher is a shell's filename language and nothing more" {
   assert_true(@myshell.glob_matches("[!0-9]*", "cmd"))
   assert_false(@myshell.glob_matches("[!0-9]*", "9cmd"))
   assert_true(@myshell.glob_matches("[^0-9]*", "cmd"))
-  // A `]` first in the class is a member, and an unclosed `[` is a literal.
+  // A `]` first in the class is a member; an unclosed `[` is a literal; a
+  // reversed range matches nothing.
   assert_true(@myshell.glob_matches("[]a]", "]"))
   assert_true(@myshell.glob_matches("[abc", "[abc"))
-  // A leading dot is only ever matched literally.
-  assert_false(@myshell.glob_matches("*", ".hidden"))
-  assert_false(@myshell.glob_matches("?hidden", ".hidden"))
-  assert_true(@myshell.glob_matches(".*", ".hidden"))
-  assert_false(@myshell.glob_matches("src/*", "src/.hidden"))
-  assert_true(@myshell.glob_matches("src/.*", "src/.hidden"))
+  assert_false(@myshell.glob_matches("[z-a]", "b"))
+  // A backslash makes the next character literal.
+  assert_true(@myshell.glob_matches("\\*", "*"))
+  assert_false(@myshell.glob_matches("\\*", "anything"))
+  assert_true(@myshell.glob_matches("a\\?c", "a?c"))
+  assert_false(@myshell.glob_matches("a\\?c", "abc"))
+  assert_true(@myshell.glob_matches("\\[abc]", "[abc]"))
   // Everything else is literal, including shell operators.
   assert_true(@myshell.glob_matches("a b.mbt", "a b.mbt"))
   assert_true(@myshell.glob_matches("$(echo x)", "$(echo x)"))
 }
 
 ///|
+test "globstar spans segments, including none, and skips hidden ones" {
+  assert_true(@myshell.glob_matches("src/**/*.mbt", "src/cmd.mbt"))
+  assert_true(@myshell.glob_matches("src/**/*.mbt", "src/a/b/cmd.mbt"))
+  assert_true(@myshell.glob_matches("**", "a/b/c"))
+  assert_true(@myshell.glob_matches("**", "file"))
+  assert_true(@myshell.glob_matches("**/x", "x"))
+  assert_true(@myshell.glob_matches("**/x", "a/b/x"))
+  assert_false(@myshell.glob_matches("src/**/*.mbt", "other/cmd.mbt"))
+  // Adjacent globstars are not an error and do not change the meaning.
+  assert_true(@myshell.glob_matches("**/**/x", "a/x"))
+  assert_true(@myshell.glob_matches("**/**/x", "x"))
+  // Hidden segments are out of reach of `**`, as they are of `*`.
+  assert_false(@myshell.glob_matches("**", ".git"))
+  assert_false(@myshell.glob_matches("**/*.mbt", ".git/cmd.mbt"))
+  assert_true(@myshell.glob_matches(".*/**", ".git/objects"))
+}
+
+///|
+test "a pathological pattern does not take exponential time" {
+  // The classic blow-up for a naive matcher: many stars separated by a
+  // character that keeps forcing it to try another split.
+  let pattern = "*a*a*a*a*a*a*a*a*a*a*a*a*b"
+  let name = "a".repeat(200)
+  assert_false(@myshell.glob_matches(pattern, name))
+  assert_true(@myshell.glob_matches(pattern, name + "b"))
+}
+
+///|
+/// Build a tree of real files and real directories.
+///
+/// Note the shape: `mkdir -p "<root>/a.mbt/.."` would create `a.mbt` itself as
+/// a directory, and `touch` on a directory then succeeds, so a fixture built
+/// that way silently tests nothing about files.
+#cfg(not(platform="windows"))
+async fn make_tree(root : String, files : Array[String]) -> Unit {
+  for file in files {
+    let cut = file.rev_find("/")
+    if cut is Some(index) {
+      @myshell.Cmd("mkdir", ["-p", "\{root}/\{file[:index].to_owned()}"]).status()
+      |> ignore
+    }
+    @myshell.Cmd("touch", ["\{root}/\{file}"]).status() |> ignore
+  }
+}
+
+///|
+#cfg(not(platform="windows"))
+async fn temp_dir() -> String {
+  @myshell.Cmd("mktemp", ["-d"]).output().check().stdout.trim().to_owned()
+}
+
+///|
 #cfg(not(platform="windows"))
 async test "expansion finds what is on disk and nothing else" {
-  let root = @myshell.Cmd("mktemp", ["-d"]).output().check().stdout
-    .trim()
-    .to_owned()
-  for
-    path in [
-      "a.mbt", "b.mbt", "c.txt", ".hidden.mbt", "src/d.mbt", "src/e.txt", "src/deep/f.mbt",
-      "src/deep/g.txt",
-    ] {
-    @myshell.Cmd("mkdir", ["-p", "\{root}/\{path}/.."]).status() |> ignore
-    @myshell.Cmd("touch", ["\{root}/\{path}"]).status() |> ignore
-  }
+  let root = temp_dir()
+  make_tree(root, [
+    "a.mbt", "b.mbt", "c.txt", ".hidden.mbt", "src/d.mbt", "src/e.txt", "src/deep/f.mbt",
+  ])
+  // Real files, not directories — the thing the old fixture got wrong.
+  assert_eq(@myshell.Cmd("test", ["-f", "\{root}/a.mbt"]).status(), 0)
+  assert_eq(@myshell.Cmd("test", ["-d", "\{root}/src"]).status(), 0)
   // One segment, and hidden entries stay hidden.
   assert_eq(@myshell.glob("*.mbt", cwd=root), ["a.mbt", "b.mbt"])
   assert_eq(@myshell.glob(".*.mbt", cwd=root), [".hidden.mbt"])
@@ -59,7 +104,16 @@ async test "expansion finds what is on disk and nothing else" {
   assert_eq(@myshell.glob("**/*.mbt", cwd=root), [
     "a.mbt", "b.mbt", "src/d.mbt", "src/deep/f.mbt",
   ])
-  // Results are sorted, and a pattern matching nothing yields nothing.
+  // A terminal `**` yields files as well as directories, and never repeats a
+  // path even when two globstars could both reach it.
+  assert_eq(@myshell.glob("**", cwd=root), [
+    "a.mbt", "b.mbt", "c.txt", "src", "src/d.mbt", "src/deep", "src/deep/f.mbt",
+    "src/e.txt",
+  ])
+  assert_eq(@myshell.glob("**/**/f.mbt", cwd=root), ["src/deep/f.mbt"])
+  // A trailing slash asks for directories only, and is kept.
+  assert_eq(@myshell.glob("*/", cwd=root), ["src/"])
+  // Nothing matched is an empty result, not the pattern.
   assert_eq(@myshell.glob("*.rs", cwd=root), [])
   assert_eq(@myshell.glob("nope/*.mbt", cwd=root), [])
   // An absolute pattern keeps its leading slash.
@@ -69,35 +123,38 @@ async test "expansion finds what is on disk and nothing else" {
 
 ///|
 #cfg(not(platform="windows"))
-async test "an expansion feeds a command as separate literal arguments" {
-  let root = @myshell.Cmd("mktemp", ["-d"]).output().check().stdout
-    .trim()
-    .to_owned()
-  // A filename containing a space and a glob character: a shell would have to
-  // be quoted carefully here, and expansion here cannot re-split it.
-  @myshell.Cmd("touch", ["\{root}/od d*name.txt"]).status() |> ignore
-  @myshell.Cmd("touch", ["\{root}/plain.txt"]).status() |> ignore
-  let matched = @myshell.glob("*.txt", cwd=root)
-  assert_eq(matched, ["od d*name.txt", "plain.txt"])
-  // Hand them to a command; each stays one argument.
-  let output = @myshell.Cmd("ls", matched, cwd=root).output().check()
-  assert_eq(output.stdout.split("\n").filter(l => !l.is_empty()).length(), 2)
+async test "a symlink loop does not trap the walker" {
+  let root = temp_dir()
+  make_tree(root, ["deep/inner/target.mbt"])
+  // A link pointing back at an ancestor: following it would never terminate.
+  @myshell.Cmd("ln", ["-s", "\{root}", "\{root}/deep/loop"]).status() |> ignore
+  assert_eq(@myshell.glob("**/*.mbt", cwd=root), ["deep/inner/target.mbt"])
   @myshell.Cmd("rm", ["-rf", root]).status() |> ignore
 }
 
 ///|
 #cfg(not(platform="windows"))
 async test "matches come back in code-unit order, not by length" {
-  let root = @myshell.Cmd("mktemp", ["-d"]).output().check().stdout
-    .trim()
-    .to_owned()
+  let root = temp_dir()
   // No case differences here: macOS is case-insensitive by default, so
   // "B.txt" and "b.txt" would be one file there and two on Linux.
-  for name in ["b.txt", "ab.txt", "aaa.txt"] {
-    @myshell.Cmd("touch", ["\{root}/\{name}"]).status() |> ignore
-  }
+  make_tree(root, ["b.txt", "ab.txt", "aaa.txt"])
   // `Array::sort` on strings orders by length first, which would have put
-  // "b.txt" before "aaa.txt". A shell does not, and neither does this.
+  // "b.txt" first. A shell does not, and neither does this.
   assert_eq(@myshell.glob("*.txt", cwd=root), ["aaa.txt", "ab.txt", "b.txt"])
+  @myshell.Cmd("rm", ["-rf", root]).status() |> ignore
+}
+
+///|
+#cfg(not(platform="windows"))
+async test "an expansion feeds a command as separate literal arguments" {
+  let root = temp_dir()
+  // A filename containing a space and a glob character: a shell would need
+  // careful quoting, and an expansion here cannot be re-split or re-expanded.
+  make_tree(root, ["od d*name.txt", "plain.txt"])
+  let matched = @myshell.glob("*.txt", cwd=root)
+  assert_eq(matched, ["od d*name.txt", "plain.txt"])
+  let output = @myshell.Cmd("ls", matched, cwd=root).output().check()
+  assert_eq(output.stdout.split("\n").filter(l => !l.is_empty()).length(), 2)
   @myshell.Cmd("rm", ["-rf", root]).status() |> ignore
 }
