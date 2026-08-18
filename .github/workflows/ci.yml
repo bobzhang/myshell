@@ -1,0 +1,43 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MoonBit
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+
+      - name: Version
+        run: moon version --all
+
+      - name: Check
+        run: moon check --deny-warn
+
+      - name: Test (wasm)
+        run: moon test --target wasm
+
+      - name: Test (native)
+        run: moon test --target native
+
+      - name: Interface is up to date
+        run: |
+          moon info
+          git diff --exit-code -- pkg.generated.mbti
+
+      - name: Formatted
+        run: |
+          moon fmt
+          git diff --exit-code
