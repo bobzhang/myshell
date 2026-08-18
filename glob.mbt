@@ -350,8 +350,10 @@ fn item_matches(item : Item, candidate : Char) -> Bool {
 /// ```
 pub async fn glob(pattern : String, cwd? : String = ".") -> Array[String] {
   let raw = split_path(pattern)
-  // An empty pattern is not the root: only a leading separator is.
-  let absolute = pattern.has_prefix("/")
+  // A leading separator makes the pattern absolute, including an escaped one,
+  // since `split_path` treats `\/` as a separator too. An empty pattern splits
+  // into one empty segment and is not absolute at all.
+  let absolute = !pattern.is_empty() && raw is [first, ..] && first.is_empty()
   // A trailing `/` asks for directories only; it is not a segment.
   // A trailing `/` asks for directories only. A pattern that is nothing but
   // separators is just the root, with no trailing request attached.
