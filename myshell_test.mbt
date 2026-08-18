@@ -585,3 +585,49 @@ async test "Graceful asks the child to stop, Kill does not" {
   inspect(@myshell.Cmd("cat", [marker]).output().success(), content="false")
   @myshell.Cmd("rm", ["-rf", directory]).status() |> ignore
 }
+
+///|
+#cfg(not(platform="windows"))
+async test "output larger than a pipe buffer survives intact" {
+  // A child that outruns the reader used to get EAGAIN on its own write and
+  // abort, leaving a silent prefix, because a `@pipe.pipe()` descriptor is
+  // non-blocking and that flag survives into the child.
+  let program = "BEGIN { for (i = 0; i < 20000; i++) print \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" }"
+  let output = @myshell.Cmd("/usr/bin/awk", [program]).output()
+  inspect(output.exit_code, content="0")
+  inspect(output.stdout_bytes.length(), content="620000")
+}
+
+///|
+#cfg(not(platform="windows"))
+async test "streaming a large output delivers every line" {
+  let program = "BEGIN { for (i = 0; i < 20000; i++) print \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" }"
+  let lines = Ref(0)
+  let code = @myshell.Cmd("/usr/bin/awk", [program]).each_line(_line => {
+    lines.val = lines.val + 1
+  })
+  inspect(code, content="0")
+  inspect(lines.val, content="20000")
+}
+
+///|
+#cfg(not(platform="windows"))
+async test "a large payload crosses every stage of a pipeline" {
+  let program = "BEGIN { for (i = 0; i < 20000; i++) print \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" }"
+  let output = @myshell.Pipeline([
+    Cmd("/usr/bin/awk", [program]),
+    Cmd("cat", []),
+    Cmd("cat", []),
+  ]).output()
+  debug_inspect(output.stage_exit_codes, content="[0, 0, 0]")
+  inspect(output.stdout_bytes.length(), content="620000")
+}
+
+///|
+#cfg(not(platform="windows"))
+async test "a large payload can be written to a child's standard input" {
+  let payload = "b".repeat(400 * 1024)
+  let output = @myshell.Cmd("cat", [], stdin=Text(payload)).output()
+  inspect(output.exit_code, content="0")
+  inspect(output.stdout.length(), content="409600")
+}

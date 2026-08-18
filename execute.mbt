@@ -107,9 +107,8 @@ pub async fn Cmd::each_line(
 ///|
 /// Execute this pipeline and capture final stdout plus every stage's stderr.
 ///
-/// Stages use real operating-system pipes and run concurrently in one
-/// structured task group. `timeout_ms`, when present, applies to the whole
-/// pipeline.
+/// Stages run concurrently in one structured task group. `timeout_ms`, when
+/// present, applies to the whole pipeline.
 ///
 /// # Example
 /// ```mbt check
@@ -250,19 +249,19 @@ fn validate_output_limit(limit : Int) -> Unit raise ProcessError {
 /// Turn a `Redirect` into the descriptor a child should receive.
 ///
 /// `None` means the child inherits the parent's descriptor. `capture` is the
-/// pipe this run reads from, and is absent when the caller keeps nothing.
+/// descriptor this run reads from, and is absent when the caller keeps nothing.
 ///
-/// A file handle returned here is closed by the spawn that consumes it, via the
+/// A handle returned here is closed by the spawn that consumes it, via the
 /// runtime's `after_spawn` hook. `&ProcessOutput` exposes no close operation, so
 /// if a later setup step for the same stage fails before the spawn, that handle
 /// stays open until the process exits. Resolving happens immediately before the
 /// spawn to keep that window as small as possible.
 async fn resolve_redirect(
   redirect : Redirect,
-  capture : @pipe.PipeWrite?,
+  capture : &@process.ProcessOutput?,
 ) -> &@process.ProcessOutput? {
   match redirect {
-    Capture => capture.map(writer => writer as &@process.ProcessOutput)
+    Capture => capture
     Inherit => None
     ToFile(path) =>
       Some(@process.redirect_to_file(path, create_mode=CreateOrTruncate))
@@ -300,7 +299,10 @@ async fn[X] spawn_stage(
 }
 
 ///|
-async fn write_standard_input(writer : @pipe.PipeWrite, input : Stdin?) -> Unit {
+async fn write_standard_input(
+  writer : @process.WriteToProcess,
+  input : Stdin?,
+) -> Unit {
   defer writer.close()
   match input {
     Some(Text(text)) => writer.write(text)
@@ -322,16 +324,8 @@ fn pipefail_exit_code(exit_codes : ArrayView[Int]) -> Int {
 }
 
 ///|
-fn close_pipes(pipes : Array[(@pipe.PipeRead, @pipe.PipeWrite)]) -> Unit {
-  for pair in pipes {
-    pair.0.close()
-    pair.1.close()
-  }
-}
-
-///|
 async fn read_bounded(
-  reader : @pipe.PipeRead,
+  reader : @process.ReadFromProcess,
   captured : Ref[Int],
   limit : Int,
   stream : String,
@@ -368,7 +362,7 @@ async fn read_bounded(
 /// bound. A CRLF terminator's CR is punctuation, not content, and so does not
 /// consume the line's allowance.
 async fn read_lines(
-  reader : @pipe.PipeRead,
+  reader : @process.ReadFromProcess,
   on_line : async (String) -> Unit,
   limit : Int,
 ) -> Unit {
@@ -439,25 +433,38 @@ fn take_line(
 async fn run_pipeline(pipeline : Pipeline, sink : Sink) -> Output {
   let commands = pipeline.commands
   let count = commands.length()
-  let owned : Array[(@pipe.PipeRead, @pipe.PipeWrite)] = []
-  defer close_pipes(owned)
   //
-  // One pipe joins each adjacent pair of stages.
-  let links : Array[(@pipe.PipeRead, @pipe.PipeWrite)] = []
+  // Each adjacent pair of stages is joined by two process-owned pipes with a
+  // relay task in between, rather than by one `@pipe.pipe()` handed to both
+  // children. A `@pipe.pipe()` is non-blocking at both ends and that flag
+  // survives into a child, so the upstream stage would get `EAGAIN` on its own
+  // write as soon as the pipe filled. Both children need a blocking
+  // descriptor, and `read_from_process` / `write_to_process` are the only way
+  // to get one today. The cost is that bytes cross the parent instead of
+  // travelling between the two children directly.
+  let junction_out : Array[&@process.ProcessOutput] = []
+  let junction_in : Array[&@process.ProcessInput] = []
+  let relays : Array[(@process.ReadFromProcess, @process.WriteToProcess)] = []
   for _ in 0..<(count - 1) {
-    let link = @pipe.pipe()
-    links.push(link)
-    owned.push(link)
+    let (reader, child_stdout) = @process.read_from_process()
+    let (child_stdin, writer) = @process.write_to_process()
+    junction_out.push(child_stdout)
+    junction_in.push(child_stdin)
+    relays.push((reader, writer))
   }
+  //
+  // Everything the parent itself reads or writes uses the process-owned pipes.
+  // `@pipe.pipe()` makes both ends non-blocking, and that flag survives into
+  // the child, so a child that outran us would get `EAGAIN` on its own write
+  // instead of blocking. `read_from_process` and `write_to_process` keep the
+  // child's end blocking, which is the whole point of using them here.
   //
   // A stage only needs a stderr pipe when this run keeps its stderr.
   let capture_stderr = sink is Buffer(_)
-  let stderr_pipes : Array[(@pipe.PipeRead, @pipe.PipeWrite)?] = []
+  let stderr_pipes : Array[(@process.ReadFromProcess, &@process.ProcessOutput)?] = []
   for cmd in commands {
     if capture_stderr && cmd.stderr is Capture {
-      let pair = @pipe.pipe()
-      owned.push(pair)
-      stderr_pipes.push(Some(pair))
+      stderr_pipes.push(Some(@process.read_from_process()))
     } else {
       stderr_pipes.push(None)
     }
@@ -466,14 +473,10 @@ async fn run_pipeline(pipeline : Pipeline, sink : Sink) -> Output {
   // The final stage needs a stdout pipe unless the caller keeps nothing.
   let final_stdout = if !(sink is Discard) &&
     commands[count - 1].stdout is Capture {
-    let pair = @pipe.pipe()
-    owned.push(pair)
-    Some(pair)
+    Some(@process.read_from_process())
   } else {
     None
   }
-  let first_stdin = @pipe.pipe()
-  owned.push(first_stdin)
   @async.with_task_group() <| group => {
     let captured = Ref(0)
     let limit = match sink {
@@ -499,6 +502,19 @@ async fn run_pipeline(pipeline : Pipeline, sink : Sink) -> Output {
       }
       _ => None
     }
+    //
+    // One relay per junction, started before the children so that a full pipe
+    // never stalls a stage.
+    for relay in relays {
+      let (reader, writer) = relay
+      group.spawn_bg(() => {
+        defer reader.close()
+        defer writer.close()
+        while reader.read_some(max_len=4096) is Some(chunk) {
+          writer.write(chunk)
+        }
+      })
+    }
     let stderr_tasks : Array[@async.Task[Bytes]?] = []
     for pair in stderr_pipes {
       match pair {
@@ -520,10 +536,11 @@ async fn run_pipeline(pipeline : Pipeline, sink : Sink) -> Output {
     let first_input : &@process.ProcessInput = match commands[0].stdin {
       Some(FromFile(path)) => @process.redirect_from_file(path)
       input => {
+        let (child_end, writer) = @process.write_to_process()
         group.spawn_bg(allow_failure=true, () => {
-          write_standard_input(first_stdin.1, input)
+          write_standard_input(writer, input)
         })
-        first_stdin.0
+        child_end
       }
     }
     let processes : Array[@process.Process] = []
@@ -531,10 +548,10 @@ async fn run_pipeline(pipeline : Pipeline, sink : Sink) -> Output {
       let stdin : &@process.ProcessInput = if index == 0 {
         first_input
       } else {
-        links[index - 1].0
+        junction_in[index - 1]
       }
       let stdout = if index + 1 < count {
-        Some(links[index].1 as &@process.ProcessOutput)
+        Some(junction_out[index])
       } else {
         resolve_redirect(cmd.stdout, final_stdout.map(pair => pair.1))
       }
@@ -542,23 +559,12 @@ async fn run_pipeline(pipeline : Pipeline, sink : Sink) -> Output {
         cmd.stderr,
         stderr_pipes[index].map(pair => pair.1),
       )
-      processes.push(spawn_stage(group, cmd, stdin, stdout, stderr))
       //
-      // Drop this parent's ends so the reader sees EOF once the child exits.
-      if index > 0 {
-        links[index - 1].0.close()
-      }
-      if index + 1 < count {
-        links[index].1.close()
-      }
-      if stderr_pipes[index] is Some((_, writer)) {
-        writer.close()
-      }
+      // No descriptor needs closing by hand any more: every child-side end
+      // comes from `read_from_process` / `write_to_process` / a file redirect,
+      // and the spawn closes it through `after_spawn`.
+      processes.push(spawn_stage(group, cmd, stdin, stdout, stderr))
     }
-    if final_stdout is Some((_, writer)) {
-      writer.close()
-    }
-    first_stdin.0.close()
     let exit_codes = [ for child in processes => child.wait() ]
     let stdout_bytes = match stdout_task {
       Some(task) => task.wait()
