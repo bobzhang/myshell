@@ -39,15 +39,33 @@ pub fn glob_matches(pattern : String, name : String) -> Bool {
 }
 
 ///|
+/// Split a path on `/`, leaving escapes intact for the segment parser.
+///
+/// An escaped separator is still a separator: a shell resolves `a\/b` as the
+/// path `a/b`, because the escape is gone by the time the name is looked up.
 fn split_path(path : String) -> Array[String] {
+  let chars = collect_chars(path)
   let segments = []
   let current = StringBuilder()
-  for char in path {
-    if char == '/' {
+  let mut index = 0
+  while index < chars.length() {
+    if chars[index] == '\\' && index + 1 < chars.length() {
+      if chars[index + 1] == '/' {
+        segments.push(current.to_string())
+        current.reset()
+      } else {
+        // Keep the escape so the segment parser can resolve it.
+        current.write_char('\\')
+        current.write_char(chars[index + 1])
+      }
+      index = index + 2
+    } else if chars[index] == '/' {
       segments.push(current.to_string())
       current.reset()
+      index = index + 1
     } else {
-      current.write_char(char)
+      current.write_char(chars[index])
+      index = index + 1
     }
   }
   segments.push(current.to_string())
@@ -196,19 +214,32 @@ fn parse_class(
     if chars[index] == ']' {
       return Some((members, negated, index + 1))
     }
-    if index + 2 < chars.length() &&
-      chars[index + 1] == '-' &&
-      chars[index + 2] != ']' {
-      let low = chars[index]
-      let high = chars[index + 2]
+    // A backslash inside a class makes the next character a plain member, so
+    // `[a\-c]` is the three characters and not the range `a` to `c`.
+    let (low, after_low) = if chars[index] == '\\' && index + 1 < chars.length() {
+      (chars[index + 1], index + 2)
+    } else {
+      (chars[index], index + 1)
+    }
+    let escaped_low = after_low == index + 2
+    if !escaped_low &&
+      after_low + 1 < chars.length() &&
+      chars[after_low] == '-' &&
+      chars[after_low + 1] != ']' {
+      let (high, after_high) = if chars[after_low + 1] == '\\' &&
+        after_low + 2 < chars.length() {
+        (chars[after_low + 2], after_low + 3)
+      } else {
+        (chars[after_low + 1], after_low + 2)
+      }
       // A reversed range such as `[z-a]` matches nothing, as in a shell.
       if low <= high {
         members.push((low, high))
       }
-      index = index + 3
+      index = after_high
     } else {
-      members.push((chars[index], chars[index]))
-      index = index + 1
+      members.push((low, low))
+      index = after_low
     }
   }
   None
@@ -299,9 +330,12 @@ pub async fn glob(pattern : String, cwd? : String = ".") -> Array[String] {
   let raw = split_path(pattern)
   let absolute = raw is [first, ..] && first.is_empty()
   // A trailing `/` asks for directories only; it is not a segment.
-  let directories_only = raw.length() > 1 &&
-    raw[raw.length() - 1].is_empty() &&
-    !(absolute && raw.length() == 2)
+  // A trailing `/` asks for directories only. A pattern that is nothing but
+  // separators is just the root, with no trailing request attached.
+  let only_separators = raw.iter().all(segment => segment.is_empty())
+  let directories_only = !only_separators &&
+    raw.length() > 1 &&
+    raw[raw.length() - 1].is_empty()
   let segments = []
   for index, segment in raw {
     // Empty segments are separator noise; the leading one only marked the
@@ -315,7 +349,8 @@ pub async fn glob(pattern : String, cwd? : String = ".") -> Array[String] {
   let (base, prefix) = if absolute { ("/", "/") } else { (cwd, "") }
   let found = []
   let seen = Map([])
-  expand(base, prefix, segments[:], directories_only, found, seen)
+  let visited = Map([])
+  expand(base, prefix, segments, 0, directories_only, found, seen, visited)
   found.sort_by(compare_code_units)
   found
 }
@@ -351,93 +386,107 @@ fn compare_code_units(left : String, right : String) -> Int {
 async fn expand(
   base : String,
   prefix : String,
-  segments : ArrayView[String],
+  segments : Array[String],
+  index : Int,
   directories_only : Bool,
   found : Array[String],
   seen : Map[String, Unit],
+  visited : Map[String, Unit],
 ) -> Unit {
-  match segments {
-    [] =>
-      if !prefix.is_empty() &&
-        !seen.contains(prefix) &&
-        @fs.exists(base) &&
-        (!directories_only || is_directory(base)) {
-        seen[prefix] = ()
-        found.push(if directories_only { prefix + "/" } else { prefix })
-      }
-    ["**", .. rest] => {
-      // `**` matches no segments at all, then every visible subdirectory in
-      // turn. Symlinked directories are not descended, so a link to an
-      // ancestor cannot loop.
-      expand(base, prefix, rest, directories_only, found, seen)
-      for entry in read_directory(base) {
-        if !is_hidden(entry) {
-          let child_base = join(base, entry)
-          let child_prefix = join(prefix, entry)
-          if is_real_directory(child_base) {
-            expand(
-              child_base, child_prefix, segments, directories_only, found, seen,
-            )
-          } else if rest is [] {
-            // `**` may also end on something that is not a directory, so a
-            // trailing globstar yields ordinary files too.
-            expand(
-              child_base, child_prefix, rest, directories_only, found, seen,
-            )
-          }
+  // Two `**` in one pattern can reach the same directory at the same point in
+  // the pattern by many different routes. Without this, `**/**/x` on a deep
+  // tree explores every way of splitting the path between the globstars, which
+  // is combinatorial even when nothing matches. A state is a place in the tree
+  // and a place in the pattern; visiting one twice can only repeat work.
+  let state = "\{index}\u{0000}\{base}"
+  if visited.contains(state) {
+    return
+  }
+  visited[state] = ()
+  if index >= segments.length() {
+    if !prefix.is_empty() &&
+      !seen.contains(prefix) &&
+      entry_exists(base) &&
+      (!directories_only || is_directory(base)) {
+      seen[prefix] = ()
+      found.push(if directories_only { prefix + "/" } else { prefix })
+    }
+    return
+  }
+  let segment = segments[index]
+  if segment == "**" {
+    // `**` matches no segments at all, then every visible entry in turn.
+    // Symlinked directories are not descended, so a link to an ancestor
+    // cannot loop.
+    expand(
+      base,
+      prefix,
+      segments,
+      index + 1,
+      directories_only,
+      found,
+      seen,
+      visited,
+    )
+    for entry in read_directory(base) {
+      if !is_hidden(entry) {
+        let child_base = join(base, entry)
+        let child_prefix = join(prefix, entry)
+        if is_real_directory(child_base) {
+          expand(
+            child_base, child_prefix, segments, index, directories_only, found, seen,
+            visited,
+          )
+        } else if index + 1 == segments.length() {
+          // A trailing `**` may also end on something that is not a
+          // directory, so it yields ordinary files too.
+          expand(
+            child_base,
+            child_prefix,
+            segments,
+            index + 1,
+            directories_only,
+            found,
+            seen,
+            visited,
+          )
         }
       }
     }
-    [segment, .. rest] =>
-      if is_literal_segment(segment) {
-        // Nothing to search: descend directly and let the final check decide.
-        let literal = unescape(segment)
-        let child = join(base, literal)
-        if rest is [] {
+  } else if is_literal_segment(segment) {
+    // Nothing to search: descend directly and let the final check decide.
+    let literal = unescape(segment)
+    let child = join(base, literal)
+    if index + 1 == segments.length() || is_directory(child) {
+      expand(
+        child,
+        join(prefix, literal),
+        segments,
+        index + 1,
+        directories_only,
+        found,
+        seen,
+        visited,
+      )
+    }
+  } else {
+    for entry in read_directory(base) {
+      if match_segment(segment, entry) {
+        let child = join(base, entry)
+        if index + 1 == segments.length() || is_directory(child) {
           expand(
             child,
-            join(prefix, literal),
-            rest,
+            join(prefix, entry),
+            segments,
+            index + 1,
             directories_only,
             found,
             seen,
+            visited,
           )
-        } else if is_directory(child) {
-          expand(
-            child,
-            join(prefix, literal),
-            rest,
-            directories_only,
-            found,
-            seen,
-          )
-        }
-      } else {
-        for entry in read_directory(base) {
-          if match_segment(segment, entry) {
-            let child = join(base, entry)
-            if rest is [] {
-              expand(
-                child,
-                join(prefix, entry),
-                rest,
-                directories_only,
-                found,
-                seen,
-              )
-            } else if is_directory(child) {
-              expand(
-                child,
-                join(prefix, entry),
-                rest,
-                directories_only,
-                found,
-                seen,
-              )
-            }
-          }
         }
       }
+    }
   }
 }
 
@@ -489,6 +538,15 @@ async fn read_directory(path : String) -> Array[String] {
 async fn is_real_directory(path : String) -> Bool {
   (@fs.kind(path, follow_symlink=false) catch { _ => return false })
   is Directory
+}
+
+///|
+/// Whether a directory entry exists, without resolving a symbolic link.
+///
+/// A glob matches the entry a directory holds, so a dangling link still
+/// matches, and a link that points at itself must not raise `ELOOP` here.
+async fn entry_exists(path : String) -> Bool {
+  (@fs.kind(path, follow_symlink=false) catch { _ => return false }) is _
 }
 
 ///|
