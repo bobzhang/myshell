@@ -585,3 +585,69 @@ async test "Graceful asks the child to stop, Kill does not" {
   inspect(@myshell.Cmd("cat", [marker]).output().success(), content="false")
   @myshell.Cmd("rm", ["-rf", directory]).status() |> ignore
 }
+
+///|
+#cfg(not(platform="windows"))
+async test "output larger than a pipe buffer survives intact" {
+  // A child that outruns the reader used to get EAGAIN on its own write and
+  // abort, leaving a silent prefix, because a `@pipe.pipe()` descriptor is
+  // non-blocking and that flag survives into the child.
+  let program = "BEGIN { for (i = 0; i < 20000; i++) print \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" }"
+  let output = @myshell.Cmd("/usr/bin/awk", [program]).output()
+  inspect(output.exit_code, content="0")
+  inspect(output.stdout_bytes.length(), content="620000")
+}
+
+///|
+#cfg(not(platform="windows"))
+async test "streaming a large output delivers every line" {
+  let program = "BEGIN { for (i = 0; i < 20000; i++) print \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" }"
+  let lines = Ref(0)
+  let code = @myshell.Cmd("/usr/bin/awk", [program]).each_line(_line => {
+    lines.val = lines.val + 1
+  })
+  inspect(code, content="0")
+  inspect(lines.val, content="20000")
+}
+
+///|
+#cfg(not(platform="windows"))
+async test "a large payload crosses every stage of a pipeline unchanged" {
+  // Every line differs, so this catches reordering and any loss or
+  // duplication that happens to preserve the byte count — which a payload of
+  // identical lines would not. It spans many 4096-byte relay reads.
+  let direct = @myshell.Cmd("seq", ["1", "100000"]).output().check()
+  assert_true(direct.stdout_bytes.length() > 500000)
+  let piped = @myshell.Pipeline([
+    Cmd("seq", ["1", "100000"]),
+    Cmd("cat", []),
+    Cmd("cat", []),
+  ]).output()
+  debug_inspect(piped.stage_exit_codes, content="[0, 0, 0]")
+  // Byte-for-byte, not merely the same length.
+  assert_eq(piped.stdout_bytes, direct.stdout_bytes)
+}
+
+///|
+#cfg(not(platform="windows"))
+async test "a large payload can be written to a child's standard input" {
+  let payload = "b".repeat(400 * 1024)
+  let output = @myshell.Cmd("cat", [], stdin=Text(payload)).output()
+  inspect(output.exit_code, content="0")
+  inspect(output.stdout.length(), content="409600")
+}
+
+///|
+#cfg(not(platform="windows"))
+async test "a stage may stop reading before the one feeding it finishes" {
+  // `yes` never ends on its own; `head` closes its input after one line. The
+  // pipeline has to finish anyway, rather than failing on the broken pipe.
+  let output = @myshell.Pipeline([Cmd("yes", []), Cmd("head", ["-n", "1"])]).output(
+    timeout_ms=10000,
+  )
+  inspect(output.stdout, content="y\n")
+  // The producer is cut off by the broken pipe, which pipefail reports.
+  inspect(output.stage_exit_codes.length(), content="2")
+  inspect(output.stage_exit_codes[1], content="0")
+  assert_true(output.stage_exit_codes[0] != 0)
+}
