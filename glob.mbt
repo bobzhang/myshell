@@ -35,17 +35,21 @@ priv enum Item {
 /// }
 /// ```
 pub fn glob_matches(pattern : String, name : String) -> Bool {
-  let (pattern_root, pattern_segments, _) = parse_path(
+  let (pattern_root, pattern_segments, pattern_directory) = parse_path(
     pattern,
     windows=native_windows,
     escapes=!native_windows,
   )
-  let (name_root, name_segments, _) = parse_path(
+  let (name_root, name_segments, name_directory) = parse_path(
     name,
     windows=native_windows,
     escapes=false,
   )
-  pattern_root == name_root && match_segments(pattern_segments, name_segments)
+  // A trailing separator is part of what a path says: `a/` asks for a
+  // directory and `a` does not, so the two do not match each other.
+  pattern_root == name_root &&
+  pattern_directory == name_directory &&
+  match_segments(pattern_segments, name_segments)
 }
 
 ///|
@@ -57,6 +61,10 @@ pub fn glob_matches(pattern : String, name : String) -> Bool {
 priv enum Root {
   Relative
   Rooted(String)
+  /// `C:` with no separator: relative to that drive's own working directory,
+  /// which is a different place from `C:/`. Its first name attaches with no
+  /// separator between.
+  DriveRelative(String)
 } derive(Eq)
 
 ///|
@@ -86,7 +94,12 @@ fn parse_path(
 ) -> (Root, Array[String], Bool) {
   let (root, rest) = if windows {
     match windows_root(text) {
-      Some((root, rest)) => (Rooted(root), rest)
+      Some((root, rest)) =>
+        if root.has_suffix("\u{0000}") {
+          (DriveRelative(root[:root.length() - 1].to_owned()), rest)
+        } else {
+          (Rooted(root), rest)
+        }
       None => (Relative, text)
     }
   } else {
@@ -96,7 +109,7 @@ fn parse_path(
   // On Unix a leading separator is what makes a path absolute, including an
   // escaped one, since the escape is gone by the time the name is resolved.
   let root = match root {
-    Rooted(_) => root
+    Rooted(_) | DriveRelative(_) => root
     Relative =>
       if !text.is_empty() && raw is [first, ..] && first.is_empty() {
         Rooted("/")
@@ -152,7 +165,12 @@ fn windows_root(text : String) -> (String, String)? {
       share.write_char(chars[index])
       index = index + 1
     }
-    return Some(("//\{server}/\{share}/", from(index)))
+    // A share needs both halves. `\\server` alone names no directory, so it is
+    // not a root; treating it as one would invent `//server//`.
+    if !server.to_string().is_empty() && !share.to_string().is_empty() {
+      return Some(("//\{server}/\{share}/", from(index)))
+    }
+    return None
   }
   // `C:/...` is rooted on that drive; a bare `C:` is relative to the drive's
   // own working directory, which only the operating system knows.
@@ -165,7 +183,9 @@ fn windows_root(text : String) -> (String, String)? {
     if separator(2) {
       return Some(("\{chars[0]}:/", from(3)))
     }
-    return Some(("\{chars[0]}:", from(2)))
+    // Marked with a NUL, which cannot occur in a path, so the caller can tell
+    // the two drive forms apart.
+    return Some(("\{chars[0]}:\u{0000}", from(2)))
   }
   if separator(0) {
     return Some(("/", from(1)))
@@ -422,6 +442,31 @@ fn match_items(items : Array[Item], name : Array[Char]) -> Bool {
 
 ///|
 fn item_matches(item : Item, candidate : Char) -> Bool {
+  // Windows filesystems do not distinguish case, so neither does matching
+  // there. A candidate is tried in both cases rather than folded, which keeps
+  // ranges such as `[a-z]` working without reasoning about where the folded
+  // character lands.
+  if native_windows {
+    let flipped = flip_case(candidate)
+    return item_matches_exactly(item, candidate) ||
+      (flipped != candidate && item_matches_exactly(item, flipped))
+  }
+  item_matches_exactly(item, candidate)
+}
+
+///|
+fn flip_case(candidate : Char) -> Char {
+  if candidate >= 'a' && candidate <= 'z' {
+    (candidate.to_int() - 32).unsafe_to_char()
+  } else if candidate >= 'A' && candidate <= 'Z' {
+    (candidate.to_int() + 32).unsafe_to_char()
+  } else {
+    candidate
+  }
+}
+
+///|
+fn item_matches_exactly(item : Item, candidate : Char) -> Bool {
   match item {
     Literal(char) => char == candidate
     Any => true
@@ -479,14 +524,20 @@ pub async fn glob(pattern : String, cwd? : String = ".") -> Array[String] {
     windows=native_windows,
     escapes=!native_windows,
   )
-  let (base, prefix) = match root {
-    Rooted(root) => (root, root)
-    Relative => (cwd, "")
+  // A drive-relative root attaches its first name directly: `C:` and `x`
+  // together are `C:x`, which is not the same place as `C:/x`.
+  let (base, prefix, drive_relative) = match root {
+    Rooted(root) => (root, root, false)
+    DriveRelative(root) => (root, root, true)
+    Relative => (cwd, "", false)
   }
   let found = []
   let seen = Map([])
   let visited = Map([])
-  expand(base, prefix, segments, 0, directories_only, found, seen, visited)
+  expand(
+    base, prefix, segments, 0, directories_only, drive_relative, found, seen, visited,
+  )
+  checkpoint()
   found.sort_by(compare_code_units)
   found
 }
@@ -523,10 +574,15 @@ async fn expand(
   segments : Array[String],
   index : Int,
   directories_only : Bool,
+  attach_directly : Bool,
   found : Array[String],
   seen : Map[String, Unit],
   visited : Map[String, Unit],
 ) -> Unit {
+  // Cancellation has to stop the walk rather than be read as one more
+  // unreadable directory. Checking the flag is not enough on its own, because
+  // a filesystem call can also return normally while the run is cancelled.
+  checkpoint()
   // Two `**` in one pattern can reach the same directory at the same point in
   // the pattern by many different routes. Without this, `**/**/x` on a deep
   // tree explores every way of splitting the path between the globstars, which
@@ -556,6 +612,7 @@ async fn expand(
       segments,
       index + 1,
       directories_only,
+      attach_directly,
       found,
       seen,
       visited,
@@ -566,8 +623,8 @@ async fn expand(
         let child_prefix = join(prefix, entry)
         if is_real_directory(child_base) {
           expand(
-            child_base, child_prefix, segments, index, directories_only, found, seen,
-            visited,
+            child_base, child_prefix, segments, index, directories_only, false, found,
+            seen, visited,
           )
         } else if index + 1 == segments.length() {
           // A trailing `**` may also end on something that is not a directory,
@@ -578,6 +635,7 @@ async fn expand(
             segments,
             index + 1,
             directories_only,
+            false,
             found,
             seen,
             visited,
@@ -588,14 +646,15 @@ async fn expand(
   } else if is_literal_segment(segment) {
     // Nothing to search: descend directly and let the final check decide.
     let literal = unescape(segment)
-    let child = join(base, literal)
+    let child = attach(base, literal, attach_directly)
     if index + 1 == segments.length() || is_directory(child) {
       expand(
         child,
-        join(prefix, literal),
+        attach(prefix, literal, attach_directly),
         segments,
         index + 1,
         directories_only,
+        false,
         found,
         seen,
         visited,
@@ -604,14 +663,15 @@ async fn expand(
   } else {
     for entry in read_directory(base) {
       if match_segment(segment, entry) {
-        let child = join(base, entry)
+        let child = attach(base, entry, attach_directly)
         if index + 1 == segments.length() || is_directory(child) {
           expand(
             child,
-            join(prefix, entry),
+            attach(prefix, entry, attach_directly),
             segments,
             index + 1,
             directories_only,
+            false,
             found,
             seen,
             visited,
@@ -619,6 +679,28 @@ async fn expand(
         }
       }
     }
+  }
+}
+
+///|
+/// Stop the walk if the run has been cancelled.
+///
+/// `pause` is a suspension point, so a cancelled coroutine raises there rather
+/// than returning. That is how cancellation is surfaced without naming the
+/// runtime's private error type.
+async fn checkpoint() -> Unit {
+  if @async.is_being_cancelled() {
+    @async.pause()
+  }
+}
+
+///|
+/// Join a name onto a path, or attach it directly for a drive-relative root.
+fn attach(prefix : String, entry : String, directly : Bool) -> String {
+  if directly {
+    prefix + entry
+  } else {
+    join(prefix, entry)
   }
 }
 
