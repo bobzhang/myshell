@@ -35,43 +35,163 @@ priv enum Item {
 /// }
 /// ```
 pub fn glob_matches(pattern : String, name : String) -> Bool {
-  match_segments(split_path(pattern), split_name(name))
+  let (pattern_root, pattern_segments, _) = parse_path(
+    pattern,
+    windows=native_windows,
+    escapes=!native_windows,
+  )
+  let (name_root, name_segments, _) = parse_path(
+    name,
+    windows=native_windows,
+    escapes=false,
+  )
+  pattern_root == name_root && match_segments(pattern_segments, name_segments)
 }
 
 ///|
-/// Split a name on `/`, with no pattern syntax of any kind.
+/// Where a path starts.
 ///
-/// A candidate is a path, not a pattern: a backslash in it is one of its
-/// characters. Splitting it the way a pattern is split would quietly rename
-/// `dir\` to `dir`, and make `glob_matches` accept a name that `glob` could
-/// never produce.
-fn split_name(name : String) -> Array[String] {
+/// Keeping the root apart from the segments is what lets one representation
+/// serve both platforms: everything after the root is just names, and only the
+/// root knows whether it came from `/`, a drive, or a share.
+priv enum Root {
+  Relative
+  Rooted(String)
+} derive(Eq)
+
+///|
+/// True when this build targets Windows.
+///
+/// Path syntax is the one place the two platforms genuinely disagree, so the
+/// parser takes it as a parameter and the public entry points pass this.
+#cfg(platform="windows")
+let native_windows : Bool = true
+
+///|
+#cfg(not(platform="windows"))
+let native_windows : Bool = false
+
+///|
+/// A parsed path: where it starts, its names, and whether it ended in a
+/// separator.
+///
+/// `windows` selects the platform's syntax rather than the host's, so the
+/// parser is testable for both from either. `escapes` is false for a candidate
+/// name, which carries no pattern syntax at all — a backslash in a name is one
+/// of its characters.
+fn parse_path(
+  text : String,
+  windows~ : Bool,
+  escapes~ : Bool,
+) -> (Root, Array[String], Bool) {
+  let (root, rest) = if windows {
+    match windows_root(text) {
+      Some((root, rest)) => (Rooted(root), rest)
+      None => (Relative, text)
+    }
+  } else {
+    (Relative, text)
+  }
+  let raw = split_path(rest, windows~, escapes~)
+  // On Unix a leading separator is what makes a path absolute, including an
+  // escaped one, since the escape is gone by the time the name is resolved.
+  let root = match root {
+    Rooted(_) => root
+    Relative =>
+      if !text.is_empty() && raw is [first, ..] && first.is_empty() {
+        Rooted("/")
+      } else {
+        Relative
+      }
+  }
+  let only_separators = raw.iter().all(segment => segment.is_empty())
+  // A trailing separator asks for directories only. A path that is nothing but
+  // separators is just its root, with no such request attached.
+  let directories_only = !only_separators &&
+    raw.length() > 1 &&
+    raw[raw.length() - 1].is_empty()
   let segments = []
-  let current = StringBuilder()
-  for char in name {
-    if char == '/' {
-      segments.push(current.to_string())
-      current.reset()
-    } else {
-      current.write_char(char)
+  for segment in raw {
+    if !segment.is_empty() {
+      segments.push(segment)
     }
   }
-  segments.push(current.to_string())
-  segments
+  (root, segments, directories_only)
 }
 
 ///|
-/// Split a path on `/`, leaving escapes intact for the segment parser.
+/// Recognise a Windows root: a drive, a drive-relative prefix, a UNC share, or
+/// a bare separator. Returns the root and the remainder.
+fn windows_root(text : String) -> (String, String)? {
+  let chars = collect_chars(text)
+  fn separator(index : Int) -> Bool {
+    index < chars.length() && (chars[index] == '/' || chars[index] == '\\')
+  }
+
+  fn from(index : Int) -> String {
+    let rest = StringBuilder()
+    for position in index..<chars.length() {
+      rest.write_char(chars[position])
+    }
+    rest.to_string()
+  }
+
+  // `\\server\share` — the share is part of the root, not a segment.
+  if separator(0) && separator(1) {
+    let mut index = 2
+    let server = StringBuilder()
+    while index < chars.length() && !separator(index) {
+      server.write_char(chars[index])
+      index = index + 1
+    }
+    if separator(index) {
+      index = index + 1
+    }
+    let share = StringBuilder()
+    while index < chars.length() && !separator(index) {
+      share.write_char(chars[index])
+      index = index + 1
+    }
+    return Some(("//\{server}/\{share}/", from(index)))
+  }
+  // `C:/...` is rooted on that drive; a bare `C:` is relative to the drive's
+  // own working directory, which only the operating system knows.
+  if chars.length() >= 2 &&
+    chars[1] == ':' &&
+    (
+      (chars[0] >= 'A' && chars[0] <= 'Z') ||
+      (chars[0] >= 'a' && chars[0] <= 'z')
+    ) {
+    if separator(2) {
+      return Some(("\{chars[0]}:/", from(3)))
+    }
+    return Some(("\{chars[0]}:", from(2)))
+  }
+  if separator(0) {
+    return Some(("/", from(1)))
+  }
+  None
+}
+
+///|
+/// Split on separators, leaving escapes intact for the segment parser.
 ///
-/// An escaped separator is still a separator: a shell resolves `a\/b` as the
-/// path `a/b`, because the escape is gone by the time the name is looked up.
-fn split_path(path : String) -> Array[String] {
+/// `/` separates on both platforms. A backslash separates on Windows, where it
+/// is the native separator, and escapes on Unix, where it is not. An escaped
+/// separator is still a separator: a shell resolves `a\/b` as the path `a/b`,
+/// because the escape is gone by the time the name is looked up.
+fn split_path(path : String, windows~ : Bool, escapes~ : Bool) -> Array[String] {
   let chars = collect_chars(path)
   let segments = []
   let current = StringBuilder()
   let mut index = 0
   while index < chars.length() {
-    if chars[index] == '\\' && index + 1 < chars.length() {
+    let char = chars[index]
+    if char == '\\' && windows {
+      segments.push(current.to_string())
+      current.reset()
+      index = index + 1
+    } else if char == '\\' && escapes && index + 1 < chars.length() {
       if chars[index + 1] == '/' {
         segments.push(current.to_string())
         current.reset()
@@ -81,12 +201,12 @@ fn split_path(path : String) -> Array[String] {
         current.write_char(chars[index + 1])
       }
       index = index + 2
-    } else if chars[index] == '/' {
+    } else if char == '/' {
       segments.push(current.to_string())
       current.reset()
       index = index + 1
     } else {
-      current.write_char(chars[index])
+      current.write_char(char)
       index = index + 1
     }
   }
@@ -322,22 +442,27 @@ fn item_matches(item : Item, candidate : Char) -> Bool {
 ///|
 /// Expand a glob pattern against the filesystem.
 ///
-/// Returns the paths that exist and match, in code-unit order, relative to
-/// `cwd` for a relative pattern and absolute for a pattern starting with `/`.
-/// Redundant separators are collapsed, and a trailing `/` is kept and restricts
-/// the result to directories, as a shell does. A pattern that matches nothing
-/// returns an empty array rather than the pattern itself, which is the one
-/// place this deliberately differs from a shell.
+/// Returns the paths that exist and match, in code-unit order and without
+/// duplicates, spelled from the same root the pattern used: relative to `cwd`
+/// for a relative pattern, and from `/`, a drive, or a share for a rooted one.
+/// Redundant separators collapse, and a trailing separator is kept and
+/// restricts the result to directories, as a shell does. A pattern that matches
+/// nothing returns an empty array rather than the pattern itself, which is the
+/// one place this deliberately differs from a shell.
 ///
-/// Hidden entries are reached only by a pattern with a literal leading `.`,
-/// and `.` and `..` are never produced. Symbolic links to directories are not
-/// descended by `**`, which is what keeps a link pointing at an ancestor from
-/// looping forever. A directory that cannot be read is skipped rather than
-/// failing the whole expansion.
+/// Hidden entries are reached only by a pattern with a literal leading `.`, and
+/// `.` and `..` are never produced by a wildcard — though a pattern may name
+/// them, so `../*` reaches the parent. Confining an expansion to a subtree is
+/// the sandbox policy's job, not this function's.
 ///
-/// See `glob_matches` for the pattern language. This is what replaces letting
-/// a shell expand `*.mbt` before a command runs — here the expansion is a value
-/// you can inspect, and each match reaches the child as one literal argument.
+/// Symbolic links to directories are not descended by `**`, which is what keeps
+/// a link pointing at an ancestor from looping forever; a component named
+/// explicitly resolves links normally. A directory that cannot be read is
+/// skipped rather than failing the whole expansion — but cancellation is never
+/// mistaken for an unreadable directory, so a cancelled expansion stops instead
+/// of returning a partial result as though it were complete.
+///
+/// See `glob_matches` for the pattern language.
 ///
 /// # Example
 /// ```mbt check
@@ -349,29 +474,15 @@ fn item_matches(item : Item, candidate : Char) -> Bool {
 /// }
 /// ```
 pub async fn glob(pattern : String, cwd? : String = ".") -> Array[String] {
-  let raw = split_path(pattern)
-  // A leading separator makes the pattern absolute, including an escaped one,
-  // since `split_path` treats `\/` as a separator too. An empty pattern splits
-  // into one empty segment and is not absolute at all.
-  let absolute = !pattern.is_empty() && raw is [first, ..] && first.is_empty()
-  // A trailing `/` asks for directories only; it is not a segment.
-  // A trailing `/` asks for directories only. A pattern that is nothing but
-  // separators is just the root, with no trailing request attached.
-  let only_separators = raw.iter().all(segment => segment.is_empty())
-  let directories_only = !only_separators &&
-    raw.length() > 1 &&
-    raw[raw.length() - 1].is_empty()
-  let segments = []
-  for index, segment in raw {
-    // Empty segments are separator noise; the leading one only marked the
-    // pattern absolute, and the trailing one only asked for directories.
-    if !segment.is_empty() || (index == 0 && !absolute) {
-      if !segment.is_empty() {
-        segments.push(segment)
-      }
-    }
+  let (root, segments, directories_only) = parse_path(
+    pattern,
+    windows=native_windows,
+    escapes=!native_windows,
+  )
+  let (base, prefix) = match root {
+    Rooted(root) => (root, root)
+    Relative => (cwd, "")
   }
-  let (base, prefix) = if absolute { ("/", "/") } else { (cwd, "") }
   let found = []
   let seen = Map([])
   let visited = Map([])
@@ -405,9 +516,7 @@ fn compare_code_units(left : String, right : String) -> Int {
 ///
 /// `base` is where to look on disk and `prefix` is how to spell what is found.
 /// They differ whenever `cwd` is not the process's own directory, so every
-/// filesystem call uses `base` and every recorded result `prefix`. `seen`
-/// records the results already produced, because two `**` in one pattern can
-/// otherwise reach the same path by more than one route.
+/// filesystem call uses `base` and every recorded result `prefix`.
 async fn expand(
   base : String,
   prefix : String,
@@ -422,7 +531,7 @@ async fn expand(
   // the pattern by many different routes. Without this, `**/**/x` on a deep
   // tree explores every way of splitting the path between the globstars, which
   // is combinatorial even when nothing matches. A state is a place in the tree
-  // and a place in the pattern; visiting one twice can only repeat work.
+  // paired with a place in the pattern; visiting one twice can only repeat work.
   let state = "\{index}\u{0000}\{base}"
   if visited.contains(state) {
     return
@@ -441,8 +550,6 @@ async fn expand(
   let segment = segments[index]
   if segment == "**" {
     // `**` matches no segments at all, then every visible entry in turn.
-    // Symlinked directories are not descended, so a link to an ancestor
-    // cannot loop.
     expand(
       base,
       prefix,
@@ -463,8 +570,8 @@ async fn expand(
             visited,
           )
         } else if index + 1 == segments.length() {
-          // A trailing `**` may also end on something that is not a
-          // directory, so it yields ordinary files too.
+          // A trailing `**` may also end on something that is not a directory,
+          // so it yields ordinary files too.
           expand(
             child_base,
             child_prefix,
@@ -550,37 +657,65 @@ fn unescape(segment : String) -> String {
 ///|
 /// List a directory, treating one that cannot be read as empty.
 ///
-/// `.` and `..` are never produced: a pattern should not be able to walk back
-/// out of the tree it is expanding.
+/// `.` and `..` are not produced: a wildcard should match names, not the two
+/// entries every directory has. A pattern may still name them.
 async fn read_directory(path : String) -> Array[String] {
   @fs.readdir(path, include_hidden=true) catch {
-    _ => []
+    // A cancelled walk must stop, not report an empty directory and carry on
+    // as though the expansion had completed.
+    error => if @async.is_cancellation_error(error) { raise error } else { [] }
   }
-}
-
-///|
-/// Whether the path is a directory and not a symbolic link to one.
-async fn is_real_directory(path : String) -> Bool {
-  (@fs.kind(path, follow_symlink=false) catch { _ => return false })
-  is Directory
 }
 
 ///|
 /// Whether a directory entry exists, without resolving a symbolic link.
 ///
 /// A glob matches the entry a directory holds, so a dangling link still
-/// matches, and a link that points at itself must not raise `ELOOP` here.
+/// matches, and a link pointing at itself must not raise `ELOOP` here.
 async fn entry_exists(path : String) -> Bool {
-  (@fs.kind(path, follow_symlink=false) catch { _ => return false }) is _
+  (@fs.kind(path, follow_symlink=false) catch {
+    error =>
+      if @async.is_cancellation_error(error) {
+        raise error
+      } else {
+        return false
+      }
+  })
+  is _
+}
+
+///|
+/// Whether the path is a directory and not a symbolic link to one.
+///
+/// Only `**` uses this. Declining to descend links is what stops a link
+/// pointing at an ancestor from making a recursive walk run forever, and it is
+/// what a shell's globstar does.
+async fn is_real_directory(path : String) -> Bool {
+  (@fs.kind(path, follow_symlink=false) catch {
+    error =>
+      if @async.is_cancellation_error(error) {
+        raise error
+      } else {
+        return false
+      }
+  })
+  is Directory
 }
 
 ///|
 /// Whether the path is a directory, resolving a symbolic link to one.
 ///
 /// This is what an explicitly named or wildcard-matched component uses: naming
-/// `/var/log/*` has to work on a system where `/var` is a link, exactly as it
-/// does in a shell. Only `**` declines to follow links, to stop a link
-/// pointing at an ancestor from making the walk run forever.
+/// `/var/log/*` has to work where `/var` is a link, exactly as it does in a
+/// shell.
 async fn is_directory(path : String) -> Bool {
-  (@fs.kind(path) catch { _ => return false }) is Directory
+  (@fs.kind(path) catch {
+    error =>
+      if @async.is_cancellation_error(error) {
+        raise error
+      } else {
+        return false
+      }
+  })
+  is Directory
 }
