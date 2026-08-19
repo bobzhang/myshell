@@ -438,6 +438,9 @@ drive (`C:/x`, `C:\x`), a drive-relative prefix (`C:x`), and a share
 (`\\server\share\x`) are recognised as roots; on Unix, where a backslash is not
 a separator, it escapes the next character instead.
 
+Matching follows the platform's own rules: on Windows, where filesystems do not
+distinguish case, `*.TXT` matches `foo.txt`.
+
 `**` does not descend symbolic links, which is what keeps a link pointing at an
 ancestor from looping forever; a component you name yourself resolves links
 normally. A wildcard never produces `.` or `..`, though a pattern may name them,
