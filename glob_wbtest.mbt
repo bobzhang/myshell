@@ -14,6 +14,9 @@ fn parsed(
   let shown = match root {
     Relative => ""
     Rooted(root) => root
+    // Shown with a trailing marker so the two drive forms are visibly
+    // different in these expectations.
+    DriveRelative(root) => root + "|drive-relative"
   }
   (shown, segments, directories_only)
 }
@@ -118,7 +121,7 @@ test "windows paths" {
   debug_inspect(
     parsed("C:x/y", windows=true),
     content=(
-      #|("C:", ["x", "y"], false)
+      #|("C:|drive-relative", ["x", "y"], false)
     ),
   )
   // A share is part of the root, not a pair of segments.
@@ -153,6 +156,31 @@ test "windows paths" {
     parsed("a\\b\\", windows=true),
     content=(
       #|("", ["a", "b"], true)
+    ),
+  )
+}
+
+///|
+test "incomplete windows roots are not roots" {
+  // A share needs a server and a share name; half of one is not a root.
+  debug_inspect(
+    parsed("\\\\server", windows=true),
+    content=(
+      #|("/", ["server"], false)
+    ),
+  )
+  // The trailing separator still asks for directories only.
+  debug_inspect(
+    parsed("\\\\server\\", windows=true),
+    content=(
+      #|("/", ["server"], true)
+    ),
+  )
+  // A drive letter is one letter followed by a colon, nothing else.
+  debug_inspect(
+    parsed("ab:/x", windows=true),
+    content=(
+      #|("", ["ab:", "x"], false)
     ),
   )
 }

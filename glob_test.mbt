@@ -255,3 +255,12 @@ async test "an escaped leading separator is still absolute" {
   assert_false(@myshell.glob("\\/tmp/*", cwd=root).contains("tmp/decoy.txt"))
   @myshell.Cmd("rm", ["-rf", root]).status() |> ignore
 }
+
+///|
+test "a trailing separator is part of what a path says" {
+  // `a/` asks for a directory and `a` does not, so neither matches the other.
+  assert_false(@myshell.glob_matches("*/", "file"))
+  assert_false(@myshell.glob_matches("a", "a/"))
+  assert_true(@myshell.glob_matches("*/", "dir/"))
+  assert_true(@myshell.glob_matches("a/", "a/"))
+}
