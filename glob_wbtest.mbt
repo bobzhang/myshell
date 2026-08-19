@@ -17,6 +17,7 @@ fn parsed(
     // Shown with a trailing marker so the two drive forms are visibly
     // different in these expectations.
     DriveRelative(root) => root + "|drive-relative"
+    Incomplete => "|incomplete"
   }
   (shown, segments, directories_only)
 }
@@ -162,18 +163,18 @@ test "windows paths" {
 
 ///|
 test "incomplete windows roots are not roots" {
-  // A share needs a server and a share name; half of one is not a root.
+  // A share needs a server and a share name. Half of one names nowhere, and
+  // must not fall through to the current drive's root as `/server`.
   debug_inspect(
     parsed("\\\\server", windows=true),
     content=(
-      #|("/", ["server"], false)
+      #|("|incomplete", [], false)
     ),
   )
-  // The trailing separator still asks for directories only.
   debug_inspect(
     parsed("\\\\server\\", windows=true),
     content=(
-      #|("/", ["server"], true)
+      #|("|incomplete", [], false)
     ),
   )
   // A drive letter is one letter followed by a colon, nothing else.
