@@ -1,4 +1,16 @@
 ///|
+#cfg(platform="windows")
+fn not_windows() -> Bool {
+  false
+}
+
+///|
+#cfg(not(platform="windows"))
+fn not_windows() -> Bool {
+  true
+}
+
+///|
 test "the matcher is a shell's filename language and nothing more" {
   // `*` and `?` stay inside one segment.
   assert_true(@myshell.glob_matches("*.mbt", "cmd.mbt"))
@@ -12,9 +24,19 @@ test "the matcher is a shell's filename language and nothing more" {
   assert_true(@myshell.glob_matches("[abc].mbt", "b.mbt"))
   assert_false(@myshell.glob_matches("[abc].mbt", "d.mbt"))
   assert_true(@myshell.glob_matches("[a-z]*.mbt", "cmd.mbt"))
-  assert_false(@myshell.glob_matches("[a-z]*.mbt", "Cmd.mbt"))
+  // Windows filesystems do not distinguish case, so this only holds elsewhere.
+  if not_windows() {
+    assert_false(@myshell.glob_matches("[a-z]*.mbt", "Cmd.mbt"))
+  }
   assert_true(@myshell.glob_matches("[!0-9]*", "cmd"))
   assert_false(@myshell.glob_matches("[!0-9]*", "9cmd"))
+  // A negated class must stay negated: folding case around the negation
+  // instead of inside it would let every letter through, on either platform.
+  assert_false(@myshell.glob_matches("[!a-z]", "q"))
+  assert_true(@myshell.glob_matches("[!a-z]", "4"))
+  // `Q` is outside `a-z` only where case is significant. Windows CI checks the
+  // other half of this.
+  assert_eq(@myshell.glob_matches("[!a-z]", "Q"), not_windows())
   assert_true(@myshell.glob_matches("[^0-9]*", "cmd"))
   // A `]` first in the class is a member; an unclosed `[` is a literal; a
   // reversed range matches nothing.

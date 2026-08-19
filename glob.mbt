@@ -47,7 +47,7 @@ pub fn glob_matches(pattern : String, name : String) -> Bool {
   )
   // A trailing separator is part of what a path says: `a/` asks for a
   // directory and `a` does not, so the two do not match each other.
-  pattern_root == name_root &&
+  same_root(pattern_root, name_root) &&
   pattern_directory == name_directory &&
   match_segments(pattern_segments, name_segments)
 }
@@ -61,11 +61,15 @@ pub fn glob_matches(pattern : String, name : String) -> Bool {
 priv enum Root {
   Relative
   Rooted(String)
+  /// A path that names a root it does not finish, such as `\\server` with no
+  /// share. It denotes no directory, so it matches nothing rather than being
+  /// quietly reinterpreted as some other root.
+  Incomplete
   /// `C:` with no separator: relative to that drive's own working directory,
   /// which is a different place from `C:/`. Its first name attaches with no
   /// separator between.
   DriveRelative(String)
-} derive(Eq)
+}
 
 ///|
 /// True when this build targets Windows.
@@ -92,7 +96,9 @@ fn parse_path(
   windows~ : Bool,
   escapes~ : Bool,
 ) -> (Root, Array[String], Bool) {
-  let (root, rest) = if windows {
+  let (root, rest) = if windows && starts_incomplete_root(text) {
+    (Incomplete, "")
+  } else if windows {
     match windows_root(text) {
       Some((root, rest)) =>
         if root.has_suffix("\u{0000}") {
@@ -109,7 +115,7 @@ fn parse_path(
   // On Unix a leading separator is what makes a path absolute, including an
   // escaped one, since the escape is gone by the time the name is resolved.
   let root = match root {
-    Rooted(_) | DriveRelative(_) => root
+    Rooted(_) | DriveRelative(_) | Incomplete => root
     Relative =>
       if !text.is_empty() && raw is [first, ..] && first.is_empty() {
         Rooted("/")
@@ -130,6 +136,24 @@ fn parse_path(
     }
   }
   (root, segments, directories_only)
+}
+
+///|
+/// Whether the text opens a share that it never completes.
+///
+/// `\\server` names no directory. Falling through would let the leading
+/// separators be read as an ordinary root and turn it into `/server`, which is
+/// somewhere else entirely.
+fn starts_incomplete_root(text : String) -> Bool {
+  let chars = collect_chars(text)
+  fn separator(index : Int) -> Bool {
+    index < chars.length() && (chars[index] == '/' || chars[index] == '\\')
+  }
+
+  if !(separator(0) && separator(1)) {
+    return false
+  }
+  windows_root(text) is None
 }
 
 ///|
@@ -442,46 +466,48 @@ fn match_items(items : Array[Item], name : Array[Char]) -> Bool {
 
 ///|
 fn item_matches(item : Item, candidate : Char) -> Bool {
-  // Windows filesystems do not distinguish case, so neither does matching
-  // there. A candidate is tried in both cases rather than folded, which keeps
-  // ranges such as `[a-z]` working without reasoning about where the folded
-  // character lands.
-  if native_windows {
-    let flipped = flip_case(candidate)
-    return item_matches_exactly(item, candidate) ||
-      (flipped != candidate && item_matches_exactly(item, flipped))
-  }
-  item_matches_exactly(item, candidate)
-}
-
-///|
-fn flip_case(candidate : Char) -> Char {
-  if candidate >= 'a' && candidate <= 'z' {
-    (candidate.to_int() - 32).unsafe_to_char()
-  } else if candidate >= 'A' && candidate <= 'Z' {
-    (candidate.to_int() + 32).unsafe_to_char()
-  } else {
-    candidate
-  }
-}
-
-///|
-fn item_matches_exactly(item : Item, candidate : Char) -> Bool {
   match item {
-    Literal(char) => char == candidate
+    Literal(char) => same_char(char, candidate)
     Any => true
     Star => false
-    Class(members, negated) => {
-      let mut found = false
-      for range in members {
-        if candidate >= range.0 && candidate <= range.1 {
-          found = true
-          break
-        }
-      }
-      found != negated
+    // Negation applies once, to the answer: folding case around it would make
+    // `[!a-z]` match every letter, since one casing is always outside a range.
+    Class(members, negated) => in_members(members, candidate) != negated
+  }
+}
+
+///|
+/// Whether two characters are the same name character.
+///
+/// Windows filesystems do not distinguish case, so neither does matching there.
+/// Only ASCII is folded: the rest of Unicode needs real case folding, which
+/// this does not attempt.
+fn same_char(left : Char, right : Char) -> Bool {
+  left == right || (native_windows && flip_case(left) == right)
+}
+
+///|
+fn in_members(members : Array[(Char, Char)], candidate : Char) -> Bool {
+  if in_ranges(members, candidate) {
+    return true
+  }
+  if native_windows {
+    let flipped = flip_case(candidate)
+    if flipped != candidate && in_ranges(members, flipped) {
+      return true
     }
   }
+  false
+}
+
+///|
+fn in_ranges(members : Array[(Char, Char)], candidate : Char) -> Bool {
+  for range in members {
+    if candidate >= range.0 && candidate <= range.1 {
+      return true
+    }
+  }
+  false
 }
 
 ///|
@@ -530,6 +556,8 @@ pub async fn glob(pattern : String, cwd? : String = ".") -> Array[String] {
     Rooted(root) => (root, root, false)
     DriveRelative(root) => (root, root, true)
     Relative => (cwd, "", false)
+    // Nothing is under a root that was never finished.
+    Incomplete => return []
   }
   let found = []
   let seen = Map([])
@@ -618,9 +646,12 @@ async fn expand(
       visited,
     )
     for entry in read_directory(base) {
+      // A large flat directory is a long stretch of pure computation, so the
+      // check belongs in the loop and not only between states.
+      checkpoint()
       if !is_hidden(entry) {
-        let child_base = join(base, entry)
-        let child_prefix = join(prefix, entry)
+        let child_base = attach(base, entry, attach_directly)
+        let child_prefix = attach(prefix, entry, attach_directly)
         if is_real_directory(child_base) {
           expand(
             child_base, child_prefix, segments, index, directories_only, false, found,
@@ -662,6 +693,7 @@ async fn expand(
     }
   } else {
     for entry in read_directory(base) {
+      checkpoint()
       if match_segment(segment, entry) {
         let child = attach(base, entry, attach_directly)
         if index + 1 == segments.length() || is_directory(child) {
@@ -800,4 +832,46 @@ async fn is_directory(path : String) -> Bool {
       }
   })
   is Directory
+}
+
+///|
+/// Whether two roots name the same place.
+///
+/// Windows does not distinguish the case of a drive letter or a share name,
+/// so `C:/` and `c:/` are one root there.
+fn same_root(left : Root, right : Root) -> Bool {
+  match (left, right) {
+    (Relative, Relative) => true
+    (Incomplete, Incomplete) => true
+    (Rooted(left), Rooted(right))
+    | (DriveRelative(left), DriveRelative(right)) =>
+      if native_windows {
+        left.length() == right.length() &&
+        (for index in 0..<left.length() {
+          if !same_char(
+              left.get_char(index).unwrap(),
+              right.get_char(index).unwrap(),
+            ) {
+            break false
+          }
+        } nobreak {
+          true
+        })
+      } else {
+        left == right
+      }
+    _ => false
+  }
+}
+
+///|
+/// Swap the case of an ASCII letter, leaving everything else alone.
+fn flip_case(candidate : Char) -> Char {
+  if candidate >= 'a' && candidate <= 'z' {
+    (candidate.to_int() - 32).unsafe_to_char()
+  } else if candidate >= 'A' && candidate <= 'Z' {
+    (candidate.to_int() + 32).unsafe_to_char()
+  } else {
+    candidate
+  }
 }
