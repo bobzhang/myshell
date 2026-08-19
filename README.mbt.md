@@ -426,16 +426,24 @@ async test {
 ```
 
 `*` and `?` stay within one path segment, `[a-z]` and `[!a-z]` match a character
-from a set, `\` makes the next character literal, and `**` as a whole segment
-spans any number of segments. A leading `.` is matched only by a literal `.`, so
-neither `*` nor `**` reaches hidden entries. A trailing `/` restricts the result
-to directories and is kept. Matches come back in code-unit order with no
-duplicates, and a pattern that matches nothing returns an empty array rather
-than the pattern itself.
+from a set, and `**` as a whole segment spans any number of segments. A leading
+`.` is matched only by a literal `.`, so neither `*` nor `**` reaches hidden
+entries. A trailing separator restricts the result to directories and is kept.
+Matches come back in code-unit order with no duplicates, and a pattern that
+matches nothing returns an empty array rather than the pattern itself.
+
+Paths are parsed into a root and a list of names, so the same code serves both
+platforms. `/` always separates. On Windows a backslash separates too, and a
+drive (`C:/x`, `C:\x`), a drive-relative prefix (`C:x`), and a share
+(`\\server\share\x`) are recognised as roots; on Unix, where a backslash is not
+a separator, it escapes the next character instead.
 
 `**` does not descend symbolic links, which is what keeps a link pointing at an
 ancestor from looping forever; a component you name yourself resolves links
-normally. `.` and `..` are never produced.
+normally. A wildcard never produces `.` or `..`, though a pattern may name them,
+so `../*` reaches the parent — confining an expansion to a subtree is the
+sandbox policy's job rather than this function's. A cancelled expansion stops
+rather than returning a partial result as though it were complete.
 
 `glob_matches` is the same pattern language without touching the disk, for
 filtering names already in hand:
