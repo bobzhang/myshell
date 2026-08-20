@@ -615,7 +615,7 @@ async test "streaming a large output delivers every line" {
 async test "a large payload crosses every stage of a pipeline unchanged" {
   // Every line differs, so this catches reordering and any loss or
   // duplication that happens to preserve the byte count — which a payload of
-  // identical lines would not. It spans many 4096-byte relay reads.
+  // identical lines would not. It spans many operating-system pipe buffers.
   let direct = @myshell.Cmd("seq", ["1", "100000"]).output().check()
   assert_true(direct.stdout_bytes.length() > 500000)
   let piped = @myshell.Pipeline([
@@ -626,6 +626,20 @@ async test "a large payload crosses every stage of a pipeline unchanged" {
   debug_inspect(piped.stage_exit_codes, content="[0, 0, 0]")
   // Byte-for-byte, not merely the same length.
   assert_eq(piped.stdout_bytes, direct.stdout_bytes)
+}
+
+///|
+#cfg(not(platform="windows"))
+async test "a direct pipe stays open until its producer reaches EOF" {
+  // Each parent-side end is closed after its spawn consumes it. Closing the
+  // producer end too early would lose "second"; retaining it would keep `cat`
+  // from observing EOF and make this hit the timeout.
+  let output = @myshell.Pipeline([
+    Cmd("/bin/sh", ["-c", "printf first; sleep 0.1; printf second"]),
+    Cmd("cat", []),
+  ]).output(timeout_ms=2000)
+  inspect(output.stdout, content="firstsecond")
+  debug_inspect(output.stage_exit_codes, content="[0, 0]")
 }
 
 ///|

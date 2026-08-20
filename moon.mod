@@ -15,5 +15,5 @@ description = "A small shell-free process EDSL for MoonBit"
 preferred_target = "wasm"
 
 import {
-  "moonbitlang/async@0.20.5",
+  "moonbitlang/async@0.21.0",
 }
