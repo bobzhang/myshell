@@ -1,0 +1,9 @@
+import {
+  "bobzhang/myshell",
+  "moonbitlang/async",
+  "moonbitlang/core/string",
+}
+
+supported_targets = "native+wasm"
+
+pkgtype(kind: "executable")
