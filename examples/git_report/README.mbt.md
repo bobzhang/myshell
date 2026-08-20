@@ -11,7 +11,7 @@ git log -n 500 --pretty=format:%an | sort | uniq -c | sort -rn
 Here it is one process and one pass:
 
 ```sh
-moon run --target native examples/git_report [max-commits]
+moon run examples/git_report [max-commits]
 ```
 
 Sample output for this repository:

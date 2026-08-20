@@ -11,7 +11,7 @@ moon check --json | jq -r '.diagnostics[].path' | sort | uniq -c | sort -rn
 Here the report is destructured with native JSON pattern matching instead:
 
 ```sh
-moon run --target native examples/check_triage [project-dir]
+moon run examples/check_triage [project-dir]
 ```
 
 Sample output for a project with warnings:
@@ -65,15 +65,17 @@ line number without `cut -d: -f1`:
 ///|
 test "take a loc apart with lexmatch" {
   let line = lexmatch "12:4-12:17" {
-    (re"^[0-9]+" as line, after=_rest) =>
-      @string.parse_int(line) catch {
-        _ => 0
-      }
-    _ => 0
+    (re"^[0-9]+" as line, after=_rest) => @string.parse_int(line)
+    _ => fail("unrecognized loc")
   }
   inspect(line, content="12")
 }
 ```
+
+Tests raise by default, so `parse_int` needs no handling here — and the
+program treats main the same way: helpers declare `raise`, call sites stay
+bare, and an uncaught error prints and exits non-zero, like `set -e` with
+messages.
 
 `moon check` exits non-zero when there are errors, but the JSON report is
 complete either way, so the program parses the report rather than checking

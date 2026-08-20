@@ -13,7 +13,7 @@ Here the three queries run concurrently in one structured task group
 (replacing `&` and `wait`, with no temp files to collect the answers):
 
 ```sh
-moon run --target native examples/gh_dashboard [owner/repo]
+moon run examples/gh_dashboard [owner/repo]
 ```
 
 Sample output for this repository:
@@ -74,6 +74,10 @@ test "trim a timestamp to a day" {
 }
 ```
 
-The three fetches run in one `@async.with_task_group`: if any of them fails,
-the others are cancelled, and when the group returns every task has
-terminated — structure a shell script cannot promise.
+Each fetch is one line — `@json.parse(Cmd("gh", args).output().check().stdout)`
+— because the whole program leans on checked-error propagation: `check`
+raises on a non-zero exit, `parse` raises on malformed JSON, and either
+propagates through the task group (cancelling the sibling fetches) and out
+of main. That is `set -e`, but typed, structured, and with a message. The
+three fetches run in one `@async.with_task_group`: when the group returns,
+every task has terminated — structure a shell script cannot promise.

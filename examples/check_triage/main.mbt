@@ -10,16 +10,13 @@
 /// report is destructured with native JSON pattern matching, and the `loc`
 /// field ("12:4-12:17") comes apart with `lexmatch` instead of `cut`.
 ///
-///   moon run --target native examples/check_triage [project-dir]
+///   moon run examples/check_triage [project-dir]
 
 ///|
-fn start_line(loc : String) -> Int {
+fn start_line(loc : String) -> Int raise {
   lexmatch loc {
-    (re"^[0-9]+" as line, after=_rest) =>
-      @string.parse_int(line) catch {
-        _ => 0
-      }
-    _ => 0
+    (re"^[0-9]+" as line, after=_rest) => @string.parse_int(line)
+    _ => fail("unrecognized loc: \{loc}")
   }
 }
 
@@ -31,8 +28,7 @@ async fn main {
   // complete either way, so parse it rather than checking the exit code.
   guard @json.parse(report.stdout)
     is { "diagnostics": Array(diagnostics), "status": String(status), .. } else {
-    println("unexpected report: \{report.stderr}")
-    return
+    fail("unexpected report: \{report.stderr}")
   }
   let by_file : Map[String, Array[(Int, String, String)]] = Map([])
   let by_level : Map[String, Int] = Map([])

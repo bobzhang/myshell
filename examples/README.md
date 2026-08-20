@@ -14,14 +14,14 @@ output.
 | `gh_dashboard` | three `gh ... \| jq` passes and `wait` | concurrent task group, JSON patterns |
 | `gh_release_notes` | `gh pr list \| jq \| sed \| sort` | JSON patterns, `lexmatch` classifier, `@argparse` |
 
-Run natively (the `gh_*` examples need an authenticated `gh`):
+Run them — the default target is wasm under moonrun (the `gh_*` examples need an authenticated `gh`):
 
 ```sh
-moon run --target native examples/todo_report
-moon run --target native examples/check_triage [project-dir]
-moon run --target native examples/git_report [max-commits]
-moon run --target native examples/gh_dashboard [owner/repo]
-moon run --target native examples/gh_release_notes [owner/repo] [--limit N]
+moon run examples/todo_report
+moon run examples/check_triage [project-dir]
+moon run examples/git_report [max-commits]
+moon run examples/gh_dashboard [owner/repo]
+moon run examples/gh_release_notes [owner/repo] [--limit N]
 ```
 
 Each example directory has a `README.mbt.md` whose code blocks are compiled
