@@ -13,7 +13,7 @@ Arguments are declared with `@argparse` — usage errors and `--help` arrive as
 one rendered message:
 
 ```sh
-moon run --target native examples/gh_release_notes [owner/repo] [--limit N]
+moon run examples/gh_release_notes [owner/repo] [--limit N]
 ```
 
 Sample output for moonbitlang/core:

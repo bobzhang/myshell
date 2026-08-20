@@ -12,7 +12,7 @@ grep as one literal argument, so a filename with a space or a `*` in it
 cannot be re-split or re-expanded:
 
 ```sh
-moon run --target native examples/todo_report
+moon run examples/todo_report
 ```
 
 Sample output for a directory with one marker:

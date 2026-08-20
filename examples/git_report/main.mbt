@@ -11,7 +11,7 @@
 /// is still running (nothing is buffered), `lexmatch` splits and classifies
 /// each line, and Maps replace `sort | uniq -c`.
 ///
-///   moon run --target native examples/git_report [max-commits]
+///   moon run examples/git_report [max-commits]
 
 ///|
 /// The conventional-commit kind of a subject line: "fix: ..." gives "fix",

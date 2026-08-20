@@ -11,7 +11,7 @@
 /// compiled regex literal and named groups instead of `cut`, and a Map
 /// replaces `sort | uniq -c`.
 ///
-///   moon run --target native examples/todo_report
+///   moon run examples/todo_report
 
 ///|
 let hit_pattern : @string.Regex = re"^(?<file>[^:]+):(?<line>[0-9]+):(?<text>.*)$"
@@ -38,7 +38,7 @@ async fn main {
       is (Some(file), Some(number), Some(text)) else {
       continue
     }
-    let line_number = @string.parse_int(number) catch { _ => continue }
+    let line_number = @string.parse_int(number)
     total += 1
     by_file
     .get_or_init(file.to_owned(), () => [])

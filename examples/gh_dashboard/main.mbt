@@ -12,18 +12,14 @@
 /// (replacing `&` and `wait`), the answers are destructured with native JSON
 /// pattern matching, and `lexmatch` trims ISO timestamps down to a day.
 ///
-///   moon run --target native examples/gh_dashboard [owner/repo]
+///   moon run examples/gh_dashboard [owner/repo]
 
 ///|
+/// One `gh` call. A non-zero exit raises via `check`, malformed JSON raises
+/// via `parse`, and either propagates through the task group — cancelling
+/// the sibling fetches — and out of main: `set -e`, but structured.
 async fn fetch(args : Array[String]) -> Json {
-  let output = @myshell.Cmd("gh", args).output()
-  if !output.success() {
-    println("gh \{args.join(" ")} failed: \{output.stderr.trim()}")
-    return []
-  }
-  @json.parse(output.stdout) catch {
-    _ => []
-  }
+  @json.parse(@myshell.Cmd("gh", args).output().check().stdout)
 }
 
 ///|
@@ -69,8 +65,7 @@ async fn main {
   })
   guard (prs, runs, issues)
     is (Array(pr_items), Array(run_items), Array(issue_items)) else {
-    println("unexpected gh output")
-    return
+    fail("unexpected gh output")
   }
   println("open PRs: \{pr_items.length()}")
   for item in pr_items {

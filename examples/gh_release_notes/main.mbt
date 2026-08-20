@@ -10,7 +10,7 @@
 /// same `lexmatch` classifier used in examples/git_report sorts titles into
 /// sections.
 ///
-///   moon run --target native examples/gh_release_notes [owner/repo] [--limit N]
+///   moon run examples/gh_release_notes [owner/repo] [--limit N]
 
 ///|
 /// The conventional-commit kind of a PR title: "fix: ..." gives "fix",
@@ -67,19 +67,16 @@ async fn main {
     fail("limit has a default value")
   }
   let output = @myshell.Cmd(
-    "gh",
-    [
-      ..repo, "pr", "list", "--state", "merged", "--json", "number,title", "--limit",
-      limit,
-    ],
-  ).output()
-  if !output.success() {
-    println("gh failed: \{output.stderr.trim()}")
-    return
-  }
+      "gh",
+      [
+        ..repo, "pr", "list", "--state", "merged", "--json", "number,title", "--limit",
+        limit,
+      ],
+    )
+    .output()
+    .check()
   guard @json.parse(output.stdout) is Array(pr_items) else {
-    println("unexpected gh output")
-    return
+    fail("unexpected gh output")
   }
   let sections : Map[String, Array[String]] = Map([])
   for item in pr_items {
