@@ -170,12 +170,11 @@ test {
 ## 5. Pipe commands
 
 Every stage is separately visible to the process host, and all stages run
-concurrently in one structured task group. Each junction is a pair of operating
-system pipes with a relay in this process between them, rather than one pipe
-shared by the two children: a pipe from `@pipe.pipe()` is non-blocking at both
-ends and that flag survives into a child, so an upstream stage would fail with
-`EAGAIN` on its own write as soon as the pipe filled. Bytes therefore cross
-this process on their way between stages.
+concurrently in one structured task group. Adjacent children share one blocking
+operating-system pipe created by `@process.pipe()`: payload bytes stay in the
+host pipe rather than crossing this process through a relay task. Each end is
+owned by the spawn that receives it, so the parent does not keep an extra copy
+that could delay EOF.
 
 ```mbt check
 ///|

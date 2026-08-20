@@ -434,14 +434,9 @@ async fn run_pipeline(pipeline : Pipeline, sink : Sink) -> Output {
   let commands = pipeline.commands
   let count = commands.length()
   //
-  // Each adjacent pair of stages is joined by two process-owned pipes with a
-  // relay task in between, rather than by one `@pipe.pipe()` handed to both
-  // children. A `@pipe.pipe()` is non-blocking at both ends and that flag
-  // survives into a child, so the upstream stage would get `EAGAIN` on its own
-  // write as soon as the pipe filled. Both children need a blocking
-  // descriptor, and `read_from_process` / `write_to_process` are the only way
-  // to get one today. The cost is that bytes cross the parent instead of
-  // travelling between the two children directly.
+  // Each adjacent pair of stages shares one process-owned operating-system
+  // pipe. Both ends are blocking in the children, so payload bytes stay in the
+  // host pipe rather than crossing this process through a relay task.
   //
   // Everything the parent itself reads or writes uses the process-owned pipes.
   // `@pipe.pipe()` makes both ends non-blocking, and that flag survives into
@@ -449,11 +444,10 @@ async fn run_pipeline(pipeline : Pipeline, sink : Sink) -> Output {
   // instead of blocking. `read_from_process` and `write_to_process` keep the
   // child's end blocking, which is the whole point of using them here.
   //
-  // Every descriptor is created immediately before the spawn that consumes it.
-  // A handle only reaches its owner through `after_spawn`, and there is no
-  // close operation on `&ProcessInput` / `&ProcessOutput`, so anything created
-  // for a spawn that never happens cannot be reclaimed. Creating late keeps
-  // that to the stage being started rather than the whole pipeline.
+  // Passing a process-owned end to `spawn` transfers that end: `after_spawn`
+  // closes the parent's copy on success or failure. A junction is created
+  // immediately before its producer is spawned, keeping any unconsumed input
+  // end local to that one junction if the producer itself fails to spawn.
   let capture_stderr = sink is Buffer(_)
   @async.with_task_group() <| group => {
     let captured = Ref(0)
@@ -488,32 +482,13 @@ async fn run_pipeline(pipeline : Pipeline, sink : Sink) -> Output {
         input
       }
       //
-      // The junction to the next stage is built here rather than up front, so
-      // that a stage which fails to spawn strands one junction instead of one
-      // per stage. Its relay starts immediately, before this stage can fill
-      // the pipe.
-      //
-      // A downstream stage may stop reading early — `head -n 1` is the usual
-      // example — and the write then fails with a broken pipe. That is the
-      // normal end of a relay, not a failure of the run, so it stops quietly.
-      // Closing both ends lets the upstream stage see the broken pipe too,
-      // which is what it would see if the two children shared one descriptor.
+      // The junction is built here rather than up front, so each end is handed
+      // directly to the child that owns it. A downstream stage that stops
+      // reading early closes the pipe in the ordinary operating-system way,
+      // and the producer observes the resulting broken pipe.
       let stdout = if index + 1 < count {
-        let (reader, child_stdout) = @process.read_from_process()
-        let (child_stdin, writer) = @process.write_to_process()
+        let (child_stdin, child_stdout) = @process.pipe()
         next_stdin = Some(child_stdin)
-        group.spawn_bg(() => {
-          defer reader.close()
-          defer writer.close()
-          for ;; {
-            // A read failure is a real fault and propagates; only the write
-            // may fail benignly, when the consumer has stopped reading.
-            match reader.read_some(max_len=4096) {
-              None => break
-              Some(chunk) => writer.write(chunk) catch { _ => break }
-            }
-          }
-        })
         Some(child_stdout)
       } else {
         let final_capture = if !(sink is Discard) && cmd.stdout is Capture {
@@ -558,9 +533,9 @@ async fn run_pipeline(pipeline : Pipeline, sink : Sink) -> Output {
       }
       let stderr = resolve_redirect(cmd.stderr, stderr_capture)
       //
-      // No descriptor needs closing by hand any more: every child-side end
-      // comes from `read_from_process` / `write_to_process` / a file redirect,
-      // and the spawn closes it through `after_spawn`.
+      // No child-side descriptor needs closing by hand: every end comes from a
+      // process helper or file redirect, and `spawn` closes the parent's copy
+      // through `after_spawn`.
       processes.push(spawn_stage(group, cmd, stdin, stdout, stderr))
     }
     let exit_codes = [ for child in processes => child.wait() ]
