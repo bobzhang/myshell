@@ -67,9 +67,8 @@ async fn main {
       )
     })
   })
-  guard prs is Array(pr_items) &&
-    runs is Array(run_items) &&
-    issues is Array(issue_items) else {
+  guard (prs, runs, issues)
+    is (Array(pr_items), Array(run_items), Array(issue_items)) else {
     println("unexpected gh output")
     return
   }
