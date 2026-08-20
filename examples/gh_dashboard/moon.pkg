@@ -1,0 +1,10 @@
+import {
+  "bobzhang/myshell",
+  "moonbitlang/async",
+  "moonbitlang/core/env",
+  "moonbitlang/core/json",
+}
+
+supported_targets = "native+wasm"
+
+pkgtype(kind: "executable")
