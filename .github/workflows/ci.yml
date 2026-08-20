@@ -40,11 +40,15 @@ jobs:
       - name: Check
         run: moon check --deny-warn
 
+      # Sequential on purpose. These tests spawn real processes, and running
+      # them in parallel put enough pressure on a runner to fail a spawn or a
+      # read with EAGAIN — which is a property of the runner, not of the code
+      # under test, and made the suite flaky on Linux.
       - name: Test (wasm)
-        run: moon test --target wasm
+        run: moon test --target wasm --no-parallelize
 
       - name: Test (native)
-        run: moon test --target native
+        run: moon test --target native --no-parallelize
 
       - name: Interface is up to date
         if: runner.os != 'Windows'
