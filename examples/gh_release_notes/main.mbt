@@ -10,7 +10,7 @@
 /// same `lexmatch` classifier used in examples/git_report sorts titles into
 /// sections.
 ///
-///   moon run --target native examples/gh_release_notes [owner/repo] [limit]
+///   moon run --target native examples/gh_release_notes [owner/repo] [--limit N]
 
 ///|
 /// The conventional-commit kind of a PR title: "fix: ..." gives "fix",
@@ -33,10 +33,38 @@ let section_order : Array[String] = [
 
 ///|
 async fn main {
-  let (repo, limit) : (Array[String], String) = match @env.args() {
-    [_, name, limit, ..] => (["-R", name], limit)
-    [_, name] => (["-R", name], "30")
-    _ => ([], "30")
+  let matches = @argparse.Command(
+    "gh_release_notes",
+    about="Draft markdown release notes from recently merged PRs",
+    positionals=[
+      @argparse.PositionArg(
+        "repo",
+        about="owner/repo (default: the current repository)",
+        num_args=@argparse.ValueRange(lower=0, upper=1),
+      ),
+    ],
+    options=[
+      @argparse.OptionArg(
+        "limit",
+        long="limit",
+        about="how many merged PRs to include",
+        default_values=["30"],
+      ),
+    ],
+  ).parse(argv=@env.args()[1:]) catch {
+    err => {
+      // Parse errors and --help both arrive as a rendered message.
+      println(err)
+      return
+    }
+  }
+  let repo : Array[String] = if matches.values.get("repo") is Some([name, ..]) {
+    ["-R", name]
+  } else {
+    []
+  }
+  guard matches.values.get("limit") is Some([limit, ..]) else {
+    fail("limit has a default value")
   }
   let output = @myshell.Cmd(
     "gh",

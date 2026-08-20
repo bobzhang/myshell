@@ -12,7 +12,7 @@ output.
 | `check_triage` | `moon check --json \| jq \| sort \| uniq -c` | JSON pattern matching, `lexmatch` on `loc` |
 | `git_report` | `git log \| sed \| sort \| uniq -c` (twice) | `each_line` streaming, `lexmatch` tokenizing |
 | `gh_dashboard` | three `gh ... \| jq` passes and `wait` | concurrent task group, JSON patterns |
-| `gh_release_notes` | `gh pr list \| jq \| sed \| sort` | JSON patterns + `lexmatch` classifier |
+| `gh_release_notes` | `gh pr list \| jq \| sed \| sort` | JSON patterns, `lexmatch` classifier, `@argparse` |
 
 Run natively (the `gh_*` examples need an authenticated `gh`):
 
@@ -21,8 +21,12 @@ moon run --target native examples/todo_report
 moon run --target native examples/check_triage [project-dir]
 moon run --target native examples/git_report [max-commits]
 moon run --target native examples/gh_dashboard [owner/repo]
-moon run --target native examples/gh_release_notes [owner/repo] [limit]
+moon run --target native examples/gh_release_notes [owner/repo] [--limit N]
 ```
+
+Each example directory has a `README.mbt.md` whose code blocks are compiled
+and run by `moon test`, so the documented techniques cannot drift from the
+toolchain.
 
 Or sandboxed, under MoonBit's deny-by-default Wasm policy with only process
 spawning enabled:
