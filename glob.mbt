@@ -14,8 +14,11 @@ priv enum Item {
 /// `*` matches any run of characters within one path segment, `?` matches one
 /// such character, `[abc]` and `[a-z]` match a character from a set, `[!abc]`
 /// and `[^abc]` match one outside it, and `**` as a whole segment matches any
-/// number of segments including none. A backslash makes the next character
-/// literal. Everything else is literal already.
+/// number of segments including none. Everything else is literal already.
+///
+/// On Unix a backslash makes the next character literal. On Windows it is the
+/// path separator instead, so there is no escape character there and a pattern
+/// that needs one has to be written for Unix.
 ///
 /// A `/` is never matched by `*` or `?`, and a segment starting with `.` is
 /// matched only by a pattern starting with a literal `.`. That rule applies to
@@ -31,7 +34,6 @@ priv enum Item {
 ///   assert_false(@myshell.glob_matches("*.mbt", "src/cmd.mbt"))
 ///   assert_true(@myshell.glob_matches("src/**/*.mbt", "src/a/b/cmd.mbt"))
 ///   assert_false(@myshell.glob_matches("*", ".hidden"))
-///   assert_true(@myshell.glob_matches("\\*", "*"))
 /// }
 /// ```
 pub fn glob_matches(pattern : String, name : String) -> Bool {

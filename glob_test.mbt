@@ -43,12 +43,19 @@ test "the matcher is a shell's filename language and nothing more" {
   assert_true(@myshell.glob_matches("[]a]", "]"))
   assert_true(@myshell.glob_matches("[abc", "[abc"))
   assert_false(@myshell.glob_matches("[z-a]", "b"))
-  // A backslash makes the next character literal.
-  assert_true(@myshell.glob_matches("\\*", "*"))
-  assert_false(@myshell.glob_matches("\\*", "anything"))
-  assert_true(@myshell.glob_matches("a\\?c", "a?c"))
-  assert_false(@myshell.glob_matches("a\\?c", "abc"))
-  assert_true(@myshell.glob_matches("\\[abc]", "[abc]"))
+  // A backslash makes the next character literal — on Unix. On Windows it is
+  // the path separator, so `\*` is a rooted pattern there rather than an
+  // escaped one, and none of this applies.
+  if not_windows() {
+    assert_true(@myshell.glob_matches("\\*", "*"))
+    assert_false(@myshell.glob_matches("\\*", "anything"))
+    assert_true(@myshell.glob_matches("a\\?c", "a?c"))
+    assert_false(@myshell.glob_matches("a\\?c", "abc"))
+    assert_true(@myshell.glob_matches("\\[abc]", "[abc]"))
+  } else {
+    // A backslash separates, so this names a root and one segment.
+    assert_true(@myshell.glob_matches("\\*", "/anything"))
+  }
   // Everything else is literal, including shell operators.
   assert_true(@myshell.glob_matches("a b.mbt", "a b.mbt"))
   assert_true(@myshell.glob_matches("$(echo x)", "$(echo x)"))
@@ -189,19 +196,23 @@ async test "an expansion feeds a command as separate literal arguments" {
 
 ///|
 test "escapes survive splitting and character classes" {
-  // An escaped separator is still a separator, as a shell resolves it.
-  assert_true(
-    @myshell.glob_matches("cmd\\/smoke/main.mbt", "cmd/smoke/main.mbt"),
-  )
-  // Inside a class, a backslash makes the next character a plain member, so
-  // this is the three characters and not the range `a` to `c`.
-  assert_true(@myshell.glob_matches("[a\\-c]", "-"))
-  assert_true(@myshell.glob_matches("[a\\-c]", "a"))
-  assert_true(@myshell.glob_matches("[a\\-c]", "c"))
-  assert_false(@myshell.glob_matches("[a\\-c]", "b"))
-  // An unescaped range still behaves as one.
+  // Escapes are a Unix-only idea: a backslash separates on Windows, so there
+  // is nothing there to escape with.
+  if not_windows() {
+    // An escaped separator is still a separator, as a shell resolves it.
+    assert_true(
+      @myshell.glob_matches("cmd\\/smoke/main.mbt", "cmd/smoke/main.mbt"),
+    )
+    // Inside a class, a backslash makes the next character a plain member, so
+    // this is the three characters and not the range `a` to `c`.
+    assert_true(@myshell.glob_matches("[a\\-c]", "-"))
+    assert_true(@myshell.glob_matches("[a\\-c]", "a"))
+    assert_true(@myshell.glob_matches("[a\\-c]", "c"))
+    assert_false(@myshell.glob_matches("[a\\-c]", "b"))
+    assert_true(@myshell.glob_matches("[\\]]", "]"))
+  }
+  // An unescaped range behaves as one everywhere.
   assert_true(@myshell.glob_matches("[a-c]", "b"))
-  assert_true(@myshell.glob_matches("[\\]]", "]"))
 }
 
 ///|
@@ -252,13 +263,18 @@ async test "a pattern of only separators is the root" {
 
 ///|
 test "a candidate is a path, not a pattern" {
-  // The backslash in the name is one of its characters, so this name has a
-  // single component called `dir\file` and does not match two components.
-  assert_false(@myshell.glob_matches("dir/file", "dir\\/file"))
-  assert_true(@myshell.glob_matches("dir\\/file", "dir/file"))
-  // Escaping an endpoint leaves the range intact; escaping the `-` does not.
-  assert_true(@myshell.glob_matches("[\\a-c]", "b"))
-  assert_false(@myshell.glob_matches("[a\\-c]", "b"))
+  if not_windows() {
+    // The backslash in the name is one of its characters, so this name has a
+    // single component called `dir\file` and does not match two components.
+    assert_false(@myshell.glob_matches("dir/file", "dir\\/file"))
+    assert_true(@myshell.glob_matches("dir\\/file", "dir/file"))
+    // Escaping an endpoint leaves the range intact; escaping the `-` does not.
+    assert_true(@myshell.glob_matches("[\\a-c]", "b"))
+    assert_false(@myshell.glob_matches("[a\\-c]", "b"))
+  } else {
+    // On Windows the backslash separates, so both spellings are the same path.
+    assert_true(@myshell.glob_matches("dir/file", "dir\\file"))
+  }
 }
 
 ///|
