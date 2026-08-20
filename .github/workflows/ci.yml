@@ -44,7 +44,14 @@ jobs:
       # them in parallel put enough pressure on a runner to fail a spawn or a
       # read with EAGAIN — which is a property of the runner, not of the code
       # under test, and made the suite flaky on Linux.
+      #
+      # Not on Windows: `#cfg(platform="windows")` describes the target, and a
+      # wasm target is never "windows", so the guards that skip the process
+      # tests do not apply there and all 84 ran against a host with no
+      # `/bin/sh` and no `/tmp`. The native job below is where Windows is
+      # actually exercised, and there the guards mean what they say.
       - name: Test (wasm)
+        if: runner.os != 'Windows'
         run: moon test --target wasm --no-parallelize
 
       - name: Test (native)
