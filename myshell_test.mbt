@@ -518,7 +518,7 @@ async test "a negative grace period is rejected before spawning" {
 #cfg(not(platform="windows"))
 async test "a graceful timeout still terminates the child" {
   try
-    @myshell.Cmd("sleep", ["5"], cancel=Graceful(grace_ms=200)).output(
+    @myshell.Cmd("sleep", ["1"], cancel=Graceful(grace_ms=200)).output(
       timeout_ms=20,
     )
     |> ignore
@@ -557,7 +557,7 @@ async test "Graceful asks the child to stop, Kill does not" {
   // `sleep` would defer the handler until it finished.
   let script =
     #|trap 'printf stopped > "$1"; kill "$sleeper" 2>/dev/null; exit 0' TERM
-    #|sleep 2 &
+    #|sleep 1 &
     #|sleeper=$!
     #|printf ready
     #|wait
