@@ -1,6 +1,7 @@
 import {
   "bobzhang/myshell",
   "moonbitlang/async",
+  "moonbitlang/core/argparse",
   "moonbitlang/core/env",
   "moonbitlang/core/json",
 }
